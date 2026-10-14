@@ -1,17 +1,16 @@
 name: robot_sim
 channels:
   - conda-forge
-  - defaults
 dependencies:
   - python=3.11
-  - numpy
-  - scipy
-  - matplotlib
+  - numpy>=2.0
+  - scipy>=1.15
+  - matplotlib>=3.8
   - pygame
-  - pytorch
+  - pytorch=2.14.1
   - setuptools<81
   - pip
   - pip:
-      - mujoco
-      - mujoco-warp
-      - warp-lang
+      - mujoco==3.16.0
+      - mujoco-warp==3.16.0
+      - warp-lang==1.18.0

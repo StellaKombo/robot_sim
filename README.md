@@ -13,14 +13,19 @@ Forward simulation of humanoid robot under a trained RL policies.
   - `plot_rom_data.py` — plots reduced-order planar state and the body-frame cmd overlay, plus a looping 2D top-down animation.
 
 ## Install
-Create the conda environment:
+The prerequisites are [conda](https://docs.conda.io/projects/conda/en/stable/user-guide/install/index.html) and `make`. The environment is defined in [`environment.yml`](environment.yml). From the repo root, run:
 ```bash
-conda env create -f environment.yml
+make install
 conda activate robot_sim
 ```
-If `environment.yml` changes, update an existing env in place:
+If `environment.yml` changes, update the existing env in place:
 ```bash
-conda env update -f environment.yml --prune
+make update
+```
+To remove the environment:
+```bash
+conda deactivate  # if the env is active
+make uninstall
 ```
 
 ## Usage
