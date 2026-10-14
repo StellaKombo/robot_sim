@@ -27,7 +27,9 @@ import mujoco.viewer
 import torch
 
 # for importing policy config and joystick utils
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT_DIR = os.getenv("ROBOT_SIM_ROOT_DIR",
+                     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, ROOT_DIR)
 from policy.actor import load_policy
 from policy.config import G1Config
 from utils.joystick_utils import pygame_to_joystick_state
@@ -144,9 +146,9 @@ def main():
 
     # parse command-line args
     parser = argparse.ArgumentParser()
-    parser.add_argument("--xml", default="models/g1_23dof.xml",
+    parser.add_argument("--xml", default=os.path.join(ROOT_DIR, "models", "g1_23dof.xml"),
                         help="path to MuJoCo XML")
-    parser.add_argument("--policy", default="policy/g1_23dof_vel.pt",
+    parser.add_argument("--policy", default=os.path.join(ROOT_DIR, "policy", "g1_23dof_vel.pt"),
                         help="path to RSL-RL .pt checkpoint")
     parser.add_argument("--sim_dt", type=float, default=0.002,
                         help="physics timestep")

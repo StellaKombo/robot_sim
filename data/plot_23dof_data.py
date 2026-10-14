@@ -15,7 +15,9 @@ import mujoco
 import mujoco.viewer
 
 # project root so we can import utils.math_utils
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT_DIR = os.getenv("ROBOT_SIM_ROOT_DIR",
+                     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, ROOT_DIR)
 from utils.math_utils import body_to_world
 
 
@@ -125,8 +127,8 @@ def playback_trajectories(xml_path, q_sel, v_sel, sim_dt, idx, render_hz=50.0,
 def main():
 
     # configuration
-    data_path = "./data/data/g1_23dof_data_01.npz"
-    xml_path = "./models/g1_23dof.xml"
+    data_path = os.path.join(ROOT_DIR, "data", "data", "g1_23dof_data_01.npz")
+    xml_path = os.path.join(ROOT_DIR, "models", "g1_23dof.xml")
 
     # trajectories to plot
     num_trajectories = 3

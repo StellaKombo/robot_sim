@@ -3,13 +3,15 @@ ENV := robot_sim
 
 .PHONY: install update uninstall
 
-# create the conda env from environment.yml
+# create the conda env and set ROBOT_SIM_ROOT_DIR to this repo
 install:
 	conda env create -f environment.yml
+	conda env config vars set -n $(ENV) ROBOT_SIM_ROOT_DIR="$(CURDIR)"
 
-# update the conda env from environment.yml
+# update the conda env from environment.yml and refresh the root path
 update:
 	conda env update -n $(ENV) -f environment.yml --prune
+	conda env config vars set -n $(ENV) ROBOT_SIM_ROOT_DIR="$(CURDIR)"
 
 # remove the conda env (must not be active; conda refuses to remove the current env)
 uninstall:

@@ -13,7 +13,9 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
 
 # project root (for symmetry with plot_23dof_data.py — no utils currently needed)
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT_DIR = os.getenv("ROBOT_SIM_ROOT_DIR",
+                     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, ROOT_DIR)
 
 
 ############################################################################
@@ -134,7 +136,7 @@ def playback_rom_trajectories(q_rom_sel, sim_dt, idx, render_hz=50.0,
 def main():
 
     # configuration
-    data_path = "./data/data/g1_rom_data_01.npz"
+    data_path = os.path.join(ROOT_DIR, "data", "data", "g1_rom_data_01.npz")
 
     # trajectories to plot
     num_trajectories = 3

@@ -21,7 +21,9 @@ import mujoco_warp as mjwarp
 import warp as wp
 
 # custom imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT_DIR = os.getenv("ROBOT_SIM_ROOT_DIR",
+                     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, ROOT_DIR)
 from policy.actor import load_policy
 from policy.config import G1Config
 from utils.math_utils import get_gravity_orientation_batch, q_to_rom, v_to_rom
@@ -427,8 +429,8 @@ if __name__ == "__main__":
     print(f"CUDA device: {torch.cuda.get_device_name(0)}")
 
     # paths
-    xml_path = "./models/g1_23dof.xml"
-    policy_path = "./policy/g1_23dof_vel.pt"
+    xml_path = os.path.join(ROOT_DIR, "models", "g1_23dof.xml")
+    policy_path = os.path.join(ROOT_DIR, "policy", "g1_23dof_vel.pt")
 
     # environment name (used for file naming)
     env_name = "g1_23dof"
@@ -513,7 +515,7 @@ if __name__ == "__main__":
     # generate numbered datasets: <env_name>_data_XX.npz (full order)
     #                             <rom_env_name>_data_XX.npz (ROM)
     tot_time = 0.0
-    save_dir = "./data/data"
+    save_dir = os.path.join(ROOT_DIR, "data", "data")
     os.makedirs(save_dir, exist_ok=True)
 
     for i in range(N_datasets):
