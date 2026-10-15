@@ -34,14 +34,15 @@ class RobotState:
     t: float           # [s] sim time
     q: np.ndarray      # (nq,) base position (3), base quaternion wxyz (4), joint positions
     v: np.ndarray      # (nv,) base linear vel, world frame (3), base angular vel, body frame (3), joint vels
+    prev_action: np.ndarray   # (nu,) policy action from the previous 50 Hz tick, as in its next observation
 
 
 def nominal_state(cfg: G1Config) -> RobotState:
     """Default standing pose with zero velocity everywhere."""
-    # position: default base pose then default joints; velocity: all zero
+    # position: default base pose then default joints; velocity and previous action: all zero
     q = np.concatenate([cfg.default_base_pos, cfg.default_joint_pos]).astype(np.float64)
     v = np.zeros(6 + len(cfg.default_joint_pos))
-    return RobotState(t=0.0, q=q, v=v)
+    return RobotState(t=0.0, q=q, v=v, prev_action=np.zeros(len(cfg.default_joint_pos)))
 
 
 ############################################################################
@@ -105,8 +106,8 @@ def run(cmd_source: CommandSource, cfg: G1Config):
         while True:
             # newest state from the sim, if a new one arrived
             try:
-                t, q, v = unpack_state(state_sub.recv(zmq.NOBLOCK), 7 + nu, 6 + nu)
-                state = RobotState(t=t, q=q, v=v)
+                t, q, v, prev_action = unpack_state(state_sub.recv(zmq.NOBLOCK), 7 + nu, 6 + nu, nu)
+                state = RobotState(t=t, q=q, v=v, prev_action=prev_action)
 
                 # zero the controller clock at the first state, and again if sim time jumps back (restart)
                 if not have_state or t < last_t:

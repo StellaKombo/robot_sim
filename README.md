@@ -68,8 +68,10 @@ python sim/single/control_custom.py    # your own logic
 - `control_joy.py`: Xbox controller. Left stick is `vx`, `vy`, and the right stick is `wz`.
 - `control_custom.py`: your own logic in `CustomCommand.get(state)`. Copy it to add another controller.
 
-`state` holds sim time `t` and the robot's full `q` and `v`. In `v`, the base's linear velocity is in
-the world frame and its angular velocity is in the body frame. 
+`state` holds sim time `t`, the robot's full `q` and `v`, and `prev_action`, the 23-D policy action from
+the previous 50 Hz policy tick (the one in the policy's next observation). In `v`, the base's linear
+velocity is in the world frame and its angular velocity is in the body frame. `control_custom.py` also
+builds the 84-D closed-loop state of the full-order KCF model each tick (`x_kcf` in `get`).
 
 #### Saving a run
 Pass `--log <name>` to `simulation.py`. When the sim exits, it writes `data/data/<name>/g1_23dof_data.npz`

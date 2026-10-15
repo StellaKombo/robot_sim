@@ -11,7 +11,7 @@ import zmq
 # both run on this PC; the sim binds both ports and the controller connects
 HOST = "127.0.0.1"
 CMD_PORT = 5555     # control_*.py -> simulation.py: body-frame [vx, vy, wz] (+ reference point)
-STATE_PORT = 5556   # simulation.py -> control_*.py: sim time, qpos, qvel
+STATE_PORT = 5556   # simulation.py -> control_*.py: sim time, qpos, qvel, previous policy action
 
 
 ############################################################################
@@ -37,18 +37,18 @@ def unpack_twist(buf: bytes):
     return a[:3].astype(np.float32), ref
 
 
-def pack_state(t: float, qpos, qvel) -> bytes:
-    """Sim time, full qpos, and full qvel as raw float64s."""
-    return np.concatenate([[t], qpos, qvel]).astype(np.float64).tobytes()
+def pack_state(t: float, qpos, qvel, prev_action) -> bytes:
+    """Sim time, full qpos, full qvel, and the policy's previous action as raw float64s."""
+    return np.concatenate([[t], qpos, qvel, prev_action]).astype(np.float64).tobytes()
 
 
-def unpack_state(buf: bytes, nq: int, nv: int):
-    """Inverse of `pack_state`: (t, qpos, qvel)."""
+def unpack_state(buf: bytes, nq: int, nv: int, nu: int):
+    """Inverse of `pack_state`: (t, qpos, qvel, prev_action)."""
     # reject anything that doesn't match this robot's sizes
     a = np.frombuffer(buf, dtype=np.float64)
-    if a.size != 1 + nq + nv:
-        raise ValueError(f"state message has {a.size} floats, expected {1 + nq + nv}.")
-    return float(a[0]), a[1:1 + nq].copy(), a[1 + nq:].copy()
+    if a.size != 1 + nq + nv + nu:
+        raise ValueError(f"state message has {a.size} floats, expected {1 + nq + nv + nu}.")
+    return float(a[0]), a[1:1 + nq].copy(), a[1 + nq:1 + nq + nv].copy(), a[1 + nq + nv:].copy()
 
 
 ############################################################################

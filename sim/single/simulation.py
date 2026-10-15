@@ -297,7 +297,8 @@ class Simulation:
         
                     # policy tick: send the state, read the newest command, check timeout, run policy
                     if k % self.decimation == 0:
-                        state_pub.send(pack_state(self.data.time, self.data.qpos, self.data.qvel))
+                        state_pub.send(pack_state(self.data.time, self.data.qpos, self.data.qvel,
+                                                  self.prev_action))
                         try:
                             cmd, self.ref = unpack_twist(cmd_sub.recv(zmq.NOBLOCK))
                             self.set_cmd(cmd)
