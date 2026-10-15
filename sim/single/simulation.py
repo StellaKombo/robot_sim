@@ -33,6 +33,7 @@ from utils.zmq_utils import CMD_PORT, STATE_PORT, bind_pub, bind_sub, pack_state
 XML_PATH = os.path.join(ROOT_DIR, "models", "g1_23dof.xml")
 POLICY_PATH = os.path.join(ROOT_DIR, "policy", "g1_23dof_vel.pt")
 SIM_DT = 0.002      # [s] physics timestep
+LOG_HZ = 100.0      # [Hz] default logging rate; must divide the sim rate exactly
 RENDER_HZ = 50.0    # [Hz] visual rendering frequency
 CMD_TIMEOUT = 0.5   # [s] without a command from a controller before falling back to zero
 
@@ -139,7 +140,7 @@ class Simulation:
     """
 
     def __init__(self, xml_path: str, policy_path: str, sim_dt: float, robot_cfg: G1Config = None,
-                 headless: bool = False, log_name: str = None):
+                 headless: bool = False, log_name: str = None, log_hz: float = LOG_HZ):
         # config and run options
         self.cfg = robot_cfg or G1Config()
         self.nu = len(self.cfg.Kp)
@@ -162,6 +163,13 @@ class Simulation:
             raise ValueError(f"sim_dt ({sim_dt}) must divide control_dt ({self.cfg.control_dt}) exactly.")
         self.decimation = int(round(ratio))
 
+        # physics steps per logged sample
+        log_ratio = 1.0 / (log_hz * sim_dt) if log_hz > 0 else 0.0
+        if log_ratio < 1 or not math.isclose(log_ratio, round(log_ratio), abs_tol=1e-9):
+            raise ValueError(f"log_hz ({log_hz}) must divide the sim rate ({1.0 / sim_dt:g} Hz) exactly.")
+        self.log_decimation = int(round(log_ratio))
+        self.log_dt = self.log_decimation * sim_dt
+
         # policy
         self.device = torch.device("cpu")
         self.policy = load_policy(policy_path, self.device)
@@ -183,6 +191,7 @@ class Simulation:
         self.ref = None   # controller's reference point [x, y], drawn when set
         self.prev_action = np.zeros(self.nu, dtype=np.float32)
         self.action = self.prev_action.copy()
+        self.n_steps = 0   # physics steps since reset, to pace logging
         self.log_q, self.log_v, self.log_cmd = [], [], []
         
         # recompute kinematics and sensors for the new state
@@ -235,7 +244,7 @@ class Simulation:
     # PHYSICS
 
     def step(self):
-        """One physics step: PD torque toward the held action's joint targets, mj_step, log."""
+        """One physics step: PD torque toward the held action's joint targets, mj_step, log if due."""
         
         if self.log_name is not None and not self.log_q:
             self._record()   # initial state, logged with the first command like parallel_sim
@@ -246,9 +255,10 @@ class Simulation:
         qvel_j = self.data.qvel[6:6 + self.nu]
         self.data.ctrl[:] = self.cfg.Kp * (qpos_des - qpos_j) + self.cfg.Kd * (-qvel_j)
         
-        # advance physics, then log the new state
+        # advance physics, then log the new state every log_decimation steps
         mujoco.mj_step(self.model, self.data)
-        if self.log_name is not None:
+        self.n_steps += 1
+        if self.log_name is not None and self.n_steps % self.log_decimation == 0:
             self._record()
 
     def _record(self):
@@ -428,12 +438,14 @@ class Simulation:
         q = np.stack(self.log_q)[None].astype(np.float32)
         v = np.stack(self.log_v)[None].astype(np.float32)
         cmd = np.stack(self.log_cmd)[None].astype(np.float32)
-        meta = dict(sim_dt=float(self.model.opt.timestep), control_dt=float(self.cfg.control_dt))
+        meta = dict(sim_dt=float(self.model.opt.timestep), control_dt=float(self.cfg.control_dt),
+                    log_dt=float(self.log_dt))
 
         # full-order file, then reduced-order file
         np.savez(full_path, q_log=q, v_log=v, cmd_log=cmd, **meta)
         np.savez(rom_path, q_rom_log=q_to_rom(q), v_rom_log=v_to_rom(q, v), cmd_log=cmd, **meta)
-        print(f"Saved {q.shape[1]} steps to {out_dir}/ (g1_23dof_data.npz, g1_rom_data.npz).")
+        print(f"Saved {q.shape[1]} samples at {1.0 / self.log_dt:g} Hz to {out_dir}/ "
+              "(g1_23dof_data.npz, g1_rom_data.npz).")
 
 
 ############################################################################
@@ -446,11 +458,13 @@ def main():
     parser = argparse.ArgumentParser(description="Single-robot G1 simulation, driven by a control_*.py.")
     parser.add_argument("--log", default=None, metavar="NAME",
                         help="save the run to data/data/NAME/ when the sim exits")
+    parser.add_argument("--log_hz", type=float, default=LOG_HZ, metavar="HZ",
+                        help=f"logging rate; must divide the {1.0 / SIM_DT:g} Hz sim rate (default {LOG_HZ:g})")
     args = parser.parse_args()
 
     # build the sim and run until the viewer closes or Ctrl+C
     robot_cfg = G1Config()
-    sim = Simulation(XML_PATH, POLICY_PATH, SIM_DT, robot_cfg, log_name=args.log)
+    sim = Simulation(XML_PATH, POLICY_PATH, SIM_DT, robot_cfg, log_name=args.log, log_hz=args.log_hz)
     try:
         sim.run()
     except KeyboardInterrupt:

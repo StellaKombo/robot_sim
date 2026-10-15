@@ -11,6 +11,7 @@ import time
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 from matplotlib.patches import Polygon
 
 # project root (for symmetry with plot_23dof_data.py — no utils currently needed)
@@ -29,20 +30,18 @@ V_ROM_LABELS = ["vx [m/s]", "vy [m/s]", "wz [rad/s]"]
 
 
 def draw_traces(axes, t, X, labels, overlays=None):
-    """Draw one line per trajectory on each axis. Optional dashed overlay."""
+    """Draw one line per trajectory on each axis. Optional dashed black overlay."""
     for d, ax in enumerate(axes):
-        lines = ax.plot(t, X[:, :, d].T, linewidth=0.8, alpha=0.8)
+        ax.plot(t, X[:, :, d].T, linewidth=0.8, alpha=0.8)
         if overlays is not None and d in overlays:
-            for traj_i, line in enumerate(lines):
-                ax.plot(t, overlays[d][traj_i], linestyle="--",
-                        color=line.get_color(), linewidth=0.8, alpha=0.8)
+            ax.plot(t, overlays[d].T, linestyle="--", color="black", linewidth=0.8, alpha=0.8)
         ax.set_title(labels[d], fontsize=9)
         ax.grid(True, alpha=0.3)
         ax.set_xlabel("time [s]", fontsize=8)
         ax.tick_params(labelsize=7)
 
 
-def playback_rom_trajectories(q_rom_sel, sim_dt, idx, render_hz=50.0,
+def playback_rom_trajectories(q_rom_sel, log_dt, idx, render_hz=50.0,
                               tri_length=0.25, tri_width=0.18, loop=True):
     """Animate selected ROM poses [px, py, theta] in a 2D top-down view in its
     own figure. Each trajectory is drawn as a triangle pointing along its
@@ -52,7 +51,7 @@ def playback_rom_trajectories(q_rom_sel, sim_dt, idx, render_hz=50.0,
     """
     num, T, _ = q_rom_sel.shape
     render_dt = 1.0 / render_hz
-    step_skip = max(1, int(round(render_dt / sim_dt)))
+    step_skip = max(1, int(round(render_dt / log_dt)))
 
     # triangle template in body frame (nose along +x)
     triangle_body = np.array([
@@ -107,7 +106,7 @@ def playback_rom_trajectories(q_rom_sel, sim_dt, idx, render_hz=50.0,
                 plt.ioff()
                 return
             # pace playback to real time
-            target = wall_start + k * sim_dt
+            target = wall_start + k * log_dt
             slack = target - time.time()
             if slack > 0:
                 time.sleep(slack)
@@ -160,10 +159,11 @@ def main():
     cmd = data["cmd_log"]                # (B, T, 3) [vx, vy, wz]  (body frame)
     sim_dt = float(data["sim_dt"])
     control_dt = float(data["control_dt"])
+    log_dt = float(data["log_dt"]) if "log_dt" in data.files else sim_dt   # older files logged every sim step
     B, T, _ = q_rom.shape
     print(f"loaded: {data_path}")
     print(f"  B={B}, T={T}")
-    print(f"  sim_dt={sim_dt}, control_dt={control_dt}")
+    print(f"  sim_dt={sim_dt}, control_dt={control_dt}, log_dt={log_dt}")
 
     # sample trajectories to plot
     num = min(num_trajectories, B)
@@ -176,7 +176,7 @@ def main():
     q_rom_sel = q_rom[idx]              # (num, T, 3)
     v_rom_sel = v_rom[idx]              # (num, T, 3)
     cmd_sel = cmd[idx]                  # (num, T, 3)
-    t = np.arange(T) * sim_dt           # (T,)
+    t = np.arange(T) * log_dt           # (T,)
 
     # v_rom and cmd are both in the body frame
     v_overlays = {
@@ -189,11 +189,15 @@ def main():
     fig_static, axes = plt.subplots(2, 3, figsize=(12, 6), constrained_layout=True)
     draw_traces(axes[0], t, q_rom_sel, Q_ROM_LABELS)
     draw_traces(axes[1], t, v_rom_sel, V_ROM_LABELS, overlays=v_overlays)
-    fig_static.suptitle("ROM traces — q_rom (top), v_rom (bottom, dashed = cmd)",
-                        fontsize=11)
+    fig_static.suptitle("ROM traces — q_rom (top), v_rom (bottom)", fontsize=11)
+
+    # line styles are shared across trajectories, so the legend uses neutral proxies
+    style_key = [Line2D([], [], color="gray", linewidth=0.8, label="actual"),
+                 Line2D([], [], color="black", linewidth=0.8, linestyle="--", label="commanded")]
+    fig_static.legend(handles=style_key, loc="outside upper right", fontsize=8)
 
     # Figure 1 — looping 2D top-down animation (blocks until the window is closed)
-    playback_rom_trajectories(q_rom_sel, sim_dt, idx, loop=True)
+    playback_rom_trajectories(q_rom_sel, log_dt, idx, loop=True)
 
     # keep static figure visible after the animation window is closed
     plt.show()

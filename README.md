@@ -15,6 +15,8 @@ Forward simulation of humanoid robot under a trained RL policies.
   - `plot_23dof_data.py` — plots full-order trajectories and replays selected trajectories in a looping MuJoCo viewer.
   - `plot_rom_data.py` — plots reduced-order planar state and the body-frame cmd overlay, plus a looping 2D top-down animation.
 
+---
+
 ## Install
 The prerequisites are [conda](https://docs.conda.io/projects/conda/en/stable/user-guide/install/index.html) and `make`. The environment is defined in [`environment.yml`](environment.yml). From the repo root, run:
 ```bash
@@ -31,6 +33,8 @@ To remove the environment:
 conda deactivate  # if the env is active
 make uninstall
 ```
+
+---
 
 ## Usage
 Scripts find the repo through the `ROBOT_SIM_ROOT_DIR` variable, which `make install` sets in the
@@ -71,8 +75,10 @@ the world frame and its angular velocity is in the body frame.
 Pass `--log <name>` to `simulation.py`. When the sim exits, it writes `data/data/<name>/g1_23dof_data.npz`
 and `data/data/<name>/g1_rom_data.npz`, in the same format and with the same names as the GPU datasets.
 Reusing a name overwrites that run. Plot it with `python data/plot_rom_data.py exp` (see below).
+The state is logged at 100 Hz by default. Set another rate with `--log_hz`, which must divide the
+500 Hz sim rate (e.g. 500, 250, 100, 50).
 ```bash
-python sim/single/simulation.py --log lissajous
+python sim/single/simulation.py --log lissajous --log_hz 200   # loagged at 200 Hz
 ```
 
 #### Behavior to know
@@ -87,10 +93,11 @@ python sim/single/simulation.py --log lissajous
 Runs batched MuJoCo Warp rollouts and writes both the full-order state and the
 reduced-order state for each rollout into `./data/data/`. Requires a CUDA GPU.
 ```bash
-python sim/parallel/parallel_sim.py
+python sim/parallel/parallel_sim.py               # logged every physics step (500 Hz)
+python sim/parallel/parallel_sim.py --log_hz 100  # logged at 100 Hz
 ```
-Edit the constants at the top of [`sim/parallel/parallel_sim.py`](sim/parallel/parallel_sim.py)
-(`batch_size`, `sim_dt_des`, `T`, `N_datasets`, `cmd_zoh_steps`) to control the
+Edit the constants in the `__main__` block of [`sim/parallel/parallel_sim.py`](sim/parallel/parallel_sim.py)
+(`batch_size`, `sim_dt_des`, `duration`, `N_datasets`, `cmd_zoh_steps`) to control the
 rollout size and command randomization. Each iteration produces two files:
 - `g1_23dof_data_XX.npz` — full order: `q_log`, `v_log`, `cmd_log`.
 - `g1_rom_data_XX.npz`   — reduced order: `q_rom_log` `[px, py, theta]`,
@@ -105,12 +112,12 @@ Full-order — Matplotlib plots of `q` and `v` plus a looping MuJoCo replay of t
 selected trajectories:
 ```bash
 python data/plot_23dof_data.py            # GPU dataset _01
-python data/plot_23dof_data.py lissajous  # the run saved with --log exp
+python data/plot_23dof_data.py lissajous  # the run saved with --log lissajous
 ```
 
 Reduced-order — Matplotlib plots of `q_rom` / `v_rom` (with body-frame cmd
 overlay) plus a looping 2D top-down animation with heading triangles:
 ```bash
 python data/plot_rom_data.py            # GPU dataset _01
-python data/plot_rom_data.py lissajous  # the run saved with --log exp
+python data/plot_rom_data.py lissajous  # the run saved with --log lissajous
 ```

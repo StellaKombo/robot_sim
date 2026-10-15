@@ -5,6 +5,7 @@
 ##
 
 # standard imports
+import argparse
 import os
 import sys
 import time
@@ -46,8 +47,9 @@ class ParallelSimConfig:
     sim_dt_des: float = None                   # desired sim timestep (None = use XML default)
     robot_config: G1Config = None              # robot config (Kp, Kd, etc.)
     
-    # data type to log
+    # logging
     log_dtype: torch.dtype = torch.float32     # data type for logging
+    log_hz: float = None                       # logging rate [Hz], must divide the sim rate (None = every sim step)
 
     # initial state bounds (if None, defaults to robot config default pose and zero velocity)
     q_lb: np.ndarray = None                    # lower bound on initial qpos, shape (nq,)
@@ -137,7 +139,7 @@ class ParallelSim:
         self.mj_model = mujoco.MjModel.from_xml_path(config.xml_path)
         self.mj_data = mujoco.MjData(self.mj_model)
 
-        # override sim timestep if desired (this is the timestep used for physics integration and logging)
+        # override sim timestep if desired (this is the timestep used for physics integration)
         if config.sim_dt_des is not None:
             self.mj_model.opt.timestep = config.sim_dt_des
         self.sim_dt = float(self.mj_model.opt.timestep)
@@ -149,6 +151,16 @@ class ParallelSim:
                 f"sim_dt ({self.sim_dt}) must divide control_dt ({self.control_dt}) exactly."
             )
         self.decimation = int(round(control_ratio))
+
+        # compute log decimation (number of sim steps per logged sample)
+        log_hz = 1.0 / self.sim_dt if config.log_hz is None else config.log_hz
+        log_ratio = 1.0 / (log_hz * self.sim_dt) if log_hz > 0 else 0.0
+        if log_ratio < 1 or not math.isclose(log_ratio, round(log_ratio), rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError(
+                f"log_hz ({log_hz}) must divide the sim rate ({1.0 / self.sim_dt:g} Hz) exactly."
+            )
+        self.log_decimation = int(round(log_ratio))
+        self.log_dt = self.log_decimation * self.sim_dt
 
         # robot state size
         self.nq = self.mj_model.nq  # 30  (7 base + 23 joints)
@@ -200,6 +212,7 @@ class ParallelSim:
         print(f"  sim_dt=[{self.sim_dt} sec]")
         print(f"  control_dt=[{self.control_dt} sec]")
         print(f"  control decimation=[{self.decimation}]")
+        print(f"  log_dt=[{self.log_dt} sec] (log decimation=[{self.log_decimation}])")
         print(f"  batch_size=[{self.batch_size}]")
 
         # load policy
@@ -323,7 +336,7 @@ class ParallelSim:
         Sample random ICs and run a policy rollout.
 
         Args:
-            T: number of sim steps (T-1 integrations, logged at sim_dt)
+            T: number of logged samples, incl. the initial state, log_dt apart
         Returns:
             q_log:   (B, T, nq) joint positions
             v_log:   (B, T, nv) joint velocities
@@ -333,19 +346,18 @@ class ParallelSim:
         return self._rollout_policy_input(q0_batch, v0_batch, T)
 
     def _rollout_policy_input(self, q0_batch: torch.Tensor, v0_batch: torch.Tensor, T: int):
-        """Run T simulation steps with the policy from given ICs.
+        """Run the policy from given ICs for (T-1)*log_decimation sim steps, logging T samples.
 
         Args:
             q0_batch: (B, nq) initial positions
             v0_batch: (B, nv) initial velocities
-            T:        number of sim steps (T-1 integrations)
+            T:        number of logged samples, incl. the initial state
         Returns:
-            q_log:   (B, T, nq) joint positions  (logged at sim_dt)
-            v_log:   (B, T, nv) joint velocities (logged at sim_dt)
-            cmd_log: (B, T, 3)  cmd active at each timestep
+            q_log, v_log: (B, T, nq), (B, T, nv) joint positions, velocities (logged at log_dt)
+            cmd_log:      (B, T, 3) cmd active at each logged timestep
         """
         B = self.batch_size
-        S = T - 1  # number of steps to take (T includes initial state)
+        S = (T - 1) * self.log_decimation  # number of sim steps to take (T includes initial state)
 
         # reset data to default state
         mjwarp.reset_data(self.wp_model, self.wp_data)
@@ -358,7 +370,7 @@ class ParallelSim:
         with wp.ScopedDevice("cuda:0"):
             mjwarp.forward(self.wp_model, self.wp_data)
 
-        # logging at sim_dt
+        # logging at log_dt
         q_log = torch.zeros(B, T, self.nq, dtype=self.log_dtype, device=self.device)
         v_log = torch.zeros(B, T, self.nv, dtype=self.log_dtype, device=self.device)
         cmd_log = torch.zeros(B, T, 3, dtype=self.log_dtype, device=self.device)
@@ -396,10 +408,12 @@ class ParallelSim:
                 self.t_ctrl[:] = tau
                 mjwarp.step(self.wp_model, self.wp_data)
 
-                # log state
-                q_log[:, step + 1, :] = self.t_qpos.to(self.log_dtype)
-                v_log[:, step + 1, :] = self.t_qvel.to(self.log_dtype)
-                cmd_log[:, step + 1, :] = self.cmd.to(self.log_dtype)
+                # log state every log_decimation sim steps
+                if (step + 1) % self.log_decimation == 0:
+                    k = (step + 1) // self.log_decimation
+                    q_log[:, k, :] = self.t_qpos.to(self.log_dtype)
+                    v_log[:, k, :] = self.t_qvel.to(self.log_dtype)
+                    cmd_log[:, k, :] = self.cmd.to(self.log_dtype)
 
         return q_log, v_log, cmd_log
 
@@ -408,7 +422,7 @@ class ParallelSim:
 
         Args:
             x0_batch: (B, nq+nv) initial states
-            T:        number of sim steps (T-1 integrations)
+            T:        number of logged samples, incl. the initial state, log_dt apart
         Returns:
             q_log:   (B, T, nq) joint positions
             v_log:   (B, T, nv) joint velocities
@@ -425,6 +439,12 @@ class ParallelSim:
 
 if __name__ == "__main__":
 
+    # parse command-line args
+    parser = argparse.ArgumentParser(description="Generate G1 rollout datasets on the GPU.")
+    parser.add_argument("--log_hz", type=float, default=None, metavar="HZ",
+                        help="logging rate; must divide the sim rate (default: every sim step)")
+    args = parser.parse_args()
+
     # print the device being used
     print(f"CUDA device: {torch.cuda.get_device_name(0)}")
 
@@ -438,8 +458,8 @@ if __name__ == "__main__":
 
     # rollout parameters
     batch_size = 1024
-    sim_dt_des = 0.002  # dt for simulation and logging (too coarse causes sim instability)
-    T = 2500            # number of sim steps to rollout (e.g., 2500 steps at 2ms sim_dt = 5.0 sec)
+    sim_dt_des = 0.002  # dt for simulation (too coarse causes sim instability)
+    duration = 5.0      # [s] rollout length; logged every 1/--log_hz seconds
 
     # number of datasets to generate
     N_datasets = 3
@@ -460,10 +480,12 @@ if __name__ == "__main__":
         seed=seed,
         sim_dt_des=sim_dt_des,
         cmd_zoh_steps=cmd_zoh_steps,
+        log_hz=args.log_hz,
     )
 
-    # create the rollout instance
+    # create the rollout instance; T counts logged samples, incl. the initial state
     r = ParallelSim(config)
+    T = int(round(duration / r.log_dt)) + 1
 
     # function to rollout and save full-order + ROM datasets,
     # returns time it took to complete the rollout (excluding saving time)
@@ -496,6 +518,7 @@ if __name__ == "__main__":
         np.savez(save_path,
                  sim_dt=float(r.sim_dt),
                  control_dt=float(r.control_dt),
+                 log_dt=float(r.log_dt),
                  q_log=q_log_np,
                  v_log=v_log_np,
                  cmd_log=cmd_log_np)
@@ -505,6 +528,7 @@ if __name__ == "__main__":
         np.savez(rom_save_path,
                  sim_dt=float(r.sim_dt),
                  control_dt=float(r.control_dt),
+                 log_dt=float(r.log_dt),
                  q_rom_log=q_rom_log_np,
                  v_rom_log=v_rom_log_np,
                  cmd_log=cmd_log_np)
