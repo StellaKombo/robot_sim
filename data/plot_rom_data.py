@@ -4,6 +4,7 @@
 # 
 ##
 
+import argparse
 import os
 import sys
 import time
@@ -135,8 +136,15 @@ def playback_rom_trajectories(q_rom_sel, sim_dt, idx, render_hz=50.0,
 
 def main():
 
-    # configuration
-    data_path = os.path.join(ROOT_DIR, "data", "data", "g1_rom_data_01.npz")
+    # which file: a simulation.py run from data/data/<run>/, else parallel_sim's dataset _01
+    parser = argparse.ArgumentParser(description="Plot a saved run or dataset.")
+    parser.add_argument("run", nargs="?", default=None,
+                        help="run name given to simulation.py --log; omit for data/data/g1_rom_data_01.npz")
+    args = parser.parse_args()
+    if args.run is None:
+        data_path = os.path.join(ROOT_DIR, "data", "data", "g1_rom_data_01.npz")
+    else:
+        data_path = os.path.join(ROOT_DIR, "data", "data", args.run, "g1_rom_data.npz")
 
     # trajectories to plot
     num_trajectories = 3

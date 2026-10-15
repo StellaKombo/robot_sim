@@ -21,7 +21,7 @@ ROOT_DIR = os.getenv("ROBOT_SIM_ROOT_DIR",
                      os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, ROOT_DIR)
 from policy.config import G1Config
-from utils.zmq_utils import CMD_PORT, connect_pub, pack_twist
+from utils.zmq_utils import CMD_PORT, STATE_PORT, connect_pub, connect_sub, pack_twist, unpack_state
 
 
 ############################################################################
@@ -30,18 +30,18 @@ from utils.zmq_utils import CMD_PORT, connect_pub, pack_twist
 
 @dataclass
 class RobotState:
-    """Full robot state seen by the command sources; for now a fixed nominal state, not the sim's."""
-    t: float           # [s] since the controller started
+    """Full robot state from simulation.py, as of its latest policy tick."""
+    t: float           # [s] sim time
     q: np.ndarray      # (nq,) base position (3), base quaternion wxyz (4), joint positions
-    v: np.ndarray      # (nv,) base linear velocity (3), base angular velocity (3), joint velocities
+    v: np.ndarray      # (nv,) base linear vel, world frame (3), base angular vel, body frame (3), joint vels
 
 
-def nominal_state(cfg: G1Config, t: float) -> RobotState:
+def nominal_state(cfg: G1Config) -> RobotState:
     """Default standing pose with zero velocity everywhere."""
     # position: default base pose then default joints; velocity: all zero
     q = np.concatenate([cfg.default_base_pos, cfg.default_joint_pos]).astype(np.float64)
     v = np.zeros(6 + len(cfg.default_joint_pos))
-    return RobotState(t=t, q=q, v=v)
+    return RobotState(t=0.0, q=q, v=v)
 
 
 ############################################################################
@@ -51,11 +51,16 @@ def nominal_state(cfg: G1Config, t: float) -> RobotState:
 class CommandSource:
     """Base for every controller: return the body-frame [vx, vy, wz] for a RobotState.
 
-    `get` is called every control_dt; the sim clips the result to cmd_scale.
+    `get` is called every control_dt; the sim clips the result to cmd_scale. `self.t_start` is the
+    sim time of the first state received, so `state.t - self.t_start` is a controller clock that
+    starts at 0. A source may set `self.ref` to a world-frame [x, y] in `get`, and the sim draws it
+    as a ball on the floor.
     """
 
     def __init__(self, cmd_scale: np.ndarray):
         self.cmd_scale = np.asarray(cmd_scale, dtype=np.float32)
+        self.t_start = 0.0   # [s] sim time of the first state received, set by run()
+        self.ref = None      # optional [x, y] reference point to display in the sim
 
     def get(self, state: RobotState) -> np.ndarray:
         raise NotImplementedError
@@ -79,21 +84,42 @@ def import_pygame():
 ############################################################################
 
 def run(cmd_source: CommandSource, cfg: G1Config):
-    """Publish a twist command every control_dt of wall time, until Ctrl+C."""
-    # connect to the sim's command socket
+    """Every control_dt of wall time, read the sim's newest state and publish a twist, until Ctrl+C.
+
+    Until the sim's first state arrives, the source sees the nominal state at t = 0.
+    """
+    # connect to the sim's command and state sockets
     ctx = zmq.Context.instance()
     cmd_pub = connect_pub(ctx, CMD_PORT)
+    state_sub = connect_sub(ctx, STATE_PORT)
     period = cfg.control_dt
-    print(f"Publishing commands to simulation.py on port {CMD_PORT} at {1.0 / period:.0f} Hz.")
+    nu = len(cfg.default_joint_pos)
+    print(f"Publishing commands to simulation.py on port {CMD_PORT} at {1.0 / period:.0f} Hz, "
+          f"reading its state on port {STATE_PORT}.")
 
-    # controller clock starts now
-    t0 = time.perf_counter()
-    next_tick = t0
+    state = nominal_state(cfg)
+    have_state = False
+    last_t = 0.0
+    next_tick = time.perf_counter()
     try:
         while True:
-            # ask the source for a command and send it
-            state = nominal_state(cfg, time.perf_counter() - t0)
-            cmd_pub.send(pack_twist(cmd_source.get(state)))
+            # newest state from the sim, if a new one arrived
+            try:
+                t, q, v = unpack_state(state_sub.recv(zmq.NOBLOCK), 7 + nu, 6 + nu)
+                state = RobotState(t=t, q=q, v=v)
+
+                # zero the controller clock at the first state, and again if sim time jumps back (restart)
+                if not have_state or t < last_t:
+                    print(f"Receiving state from simulation.py; zeroing controller time at sim t = {t:.2f} s.")
+                    cmd_source.t_start = t
+                    have_state = True
+                last_t = t
+            except zmq.Again:
+                pass
+
+            # ask the source for a command, then send it with any reference point it set
+            cmd = cmd_source.get(state)
+            cmd_pub.send(pack_twist(cmd, cmd_source.ref))
 
             # fixed-rate ticks; after a stall, resync instead of firing a burst of late ticks
             next_tick += period
@@ -106,6 +132,7 @@ def run(cmd_source: CommandSource, cfg: G1Config):
         print("\nController stopped.")
     finally:
         cmd_pub.close()
+        state_sub.close()
 
 
 def main(source_class: type, description: str):

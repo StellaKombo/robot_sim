@@ -4,8 +4,10 @@
 #
 ##
 
+# standard imports
 import numpy as np
 
+# custom imports
 from control_base import CommandSource, RobotState, import_pygame, main
 
 

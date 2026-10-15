@@ -27,7 +27,7 @@ sys.path.insert(0, ROOT_DIR)
 from policy.actor import load_policy
 from policy.config import G1Config
 from utils.math_utils import gravity_from_quat, q_to_rom, v_to_rom
-from utils.zmq_utils import CMD_PORT, bind_sub, unpack_twist
+from utils.zmq_utils import CMD_PORT, STATE_PORT, bind_pub, bind_sub, pack_state, unpack_twist
 
 # GLOBAL VARIABLES
 XML_PATH = os.path.join(ROOT_DIR, "models", "g1_23dof.xml")
@@ -35,6 +35,74 @@ POLICY_PATH = os.path.join(ROOT_DIR, "policy", "g1_23dof_vel.pt")
 SIM_DT = 0.002      # [s] physics timestep
 RENDER_HZ = 50.0    # [Hz] visual rendering frequency
 CMD_TIMEOUT = 0.5   # [s] without a command from a controller before falling back to zero
+
+# world-frame RGB triad at the origin (X=red, Y=green, Z=blue), as in mj-nlp's replay
+AXIS_LEN = 0.2        # [m] length of each axis cylinder
+AXIS_RADIUS = 0.008   # [m] radius of each axis cylinder
+AXIS_ALPHA = 0.3      # opacity of the axis cylinders (0 = invisible, 1 = opaque)
+
+# overlays: the controller's reference point, and commanded vs actual twist arrows over the head
+REF_RADIUS = 0.05                     # [m] reference ball radius
+REF_RGBA = (1.0, 0.5, 0.0, 0.8)       # orange
+ARROW_SCALE = 0.5                     # [m] of arrow per m/s or rad/s
+ARROW_HEIGHT = 0.65                   # [m] arrows start this far above the pelvis, over the head
+ARROW_WIDTH = 0.015                   # [m]
+CMD_RGBA = (0.1, 0.3, 1.0, 0.8)       # commanded vx, vy and wz: blue
+ACT_RGBA = (1.0, 0.15, 0.15, 0.8)     # actual vx, vy and wz: red
+
+# timing legend in the viewer's top-left corner, as in deploy_robot's simulation
+LEGEND_FONT = getattr(mujoco.mjtFontScale, "mjFONTSCALE_250",
+                      getattr(mujoco.mjtFontScale, "mjFONTSCALE_200", mujoco.mjtFontScale.mjFONTSCALE_150))
+
+
+############################################################################
+# MODEL
+############################################################################
+
+def load_model(xml_path: str) -> mujoco.MjModel:
+    """Load the XML and add the world-frame triad; its geoms are massless and never collide."""
+    spec = mujoco.MjSpec.from_file(xml_path)
+    body = spec.worldbody.add_body(name="world_axes")
+    for fromto, rgba in (
+        ([0, 0, 0, AXIS_LEN, 0, 0], [1, 0, 0, AXIS_ALPHA]),   # +X red
+        ([0, 0, 0, 0, AXIS_LEN, 0], [0, 1, 0, AXIS_ALPHA]),   # +Y green
+        ([0, 0, 0, 0, 0, AXIS_LEN], [0, 0, 1, AXIS_ALPHA]),   # +Z blue
+    ):
+        g = body.add_geom()
+        g.type = mujoco.mjtGeom.mjGEOM_CYLINDER
+        g.fromto = fromto
+        g.size = [AXIS_RADIUS, 0, 0]
+        g.rgba = rgba
+        g.contype = 0
+        g.conaffinity = 0
+        g.density = 0.0
+    return spec.compile()
+
+
+############################################################################
+# OVERLAY GEOMS
+############################################################################
+
+def add_sphere(scn: mujoco.MjvScene, center, radius: float, rgba):
+    """Append a decorative sphere to a scene; skipped if the scene is full."""
+    if scn.ngeom >= scn.maxgeom:
+        return
+    mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE, np.array([radius, 0, 0]),
+                        np.asarray(center, dtype=np.float64), np.eye(3).flatten(),
+                        np.asarray(rgba, dtype=np.float32))
+    scn.ngeom += 1
+
+
+def add_arrow(scn: mujoco.MjvScene, start, end, rgba, width: float = ARROW_WIDTH):
+    """Append a decorative arrow from `start` to `end`; skipped if the scene is full."""
+    if scn.ngeom >= scn.maxgeom:
+        return
+    geom = scn.geoms[scn.ngeom]
+    mujoco.mjv_initGeom(geom, mujoco.mjtGeom.mjGEOM_ARROW, np.zeros(3), np.zeros(3), np.zeros(9),
+                        np.asarray(rgba, dtype=np.float32))
+    mujoco.mjv_connector(geom, mujoco.mjtGeom.mjGEOM_ARROW, width,
+                         np.asarray(start, dtype=np.float64), np.asarray(end, dtype=np.float64))
+    scn.ngeom += 1
 
 
 ############################################################################
@@ -71,21 +139,22 @@ class Simulation:
     """
 
     def __init__(self, xml_path: str, policy_path: str, sim_dt: float, robot_cfg: G1Config = None,
-                 headless: bool = False, log_path: str = None):
+                 headless: bool = False, log_name: str = None):
         # config and run options
         self.cfg = robot_cfg or G1Config()
         self.nu = len(self.cfg.Kp)
         self.headless = headless
-        self.log_path = log_path
+        self.log_name = log_name     # run name; the log goes to data/data/<log_name>/
 
         # model and data
-        self.model = mujoco.MjModel.from_xml_path(xml_path)
+        self.model = load_model(xml_path)
         self.model.opt.timestep = sim_dt
         self.data = mujoco.MjData(self.model)
         
         # pelvis gyro's slot in sensordata, looked up by name
         gyro_adr = self.model.sensor("pelvis_imu_gyro_sensor").adr[0]
         self.gyro_slice = slice(gyro_adr, gyro_adr + 3)
+        self.pelvis_id = self.model.body("pelvis").id
 
         # physics steps per policy query
         ratio = self.cfg.control_dt / sim_dt
@@ -111,6 +180,7 @@ class Simulation:
         
         # zero command, fresh policy memory, empty log
         self.cmd = np.zeros(3, dtype=np.float32)
+        self.ref = None   # controller's reference point [x, y], drawn when set
         self.prev_action = np.zeros(self.nu, dtype=np.float32)
         self.action = self.prev_action.copy()
         self.log_q, self.log_v, self.log_cmd = [], [], []
@@ -167,7 +237,7 @@ class Simulation:
     def step(self):
         """One physics step: PD torque toward the held action's joint targets, mj_step, log."""
         
-        if self.log_path is not None and not self.log_q:
+        if self.log_name is not None and not self.log_q:
             self._record()   # initial state, logged with the first command like parallel_sim
         
         # PD torque toward the joint targets encoded by the held action
@@ -178,7 +248,7 @@ class Simulation:
         
         # advance physics, then log the new state
         mujoco.mj_step(self.model, self.data)
-        if self.log_path is not None:
+        if self.log_name is not None:
             self._record()
 
     def _record(self):
@@ -190,42 +260,55 @@ class Simulation:
     # RUN LOOP
 
     def run(self, duration: float = None):
-        """Real time until the viewer closes; reads the newest command before each policy query."""
+        """Real time until the viewer closes; each policy tick sends the state, then reads a command."""
         
-        # command socket, optional step budget, and real-time pacer
+        # command and state sockets, optional step budget, and real-time pacer
         ctx = zmq.Context.instance()
         cmd_sub = bind_sub(ctx, CMD_PORT)
+        state_pub = bind_pub(ctx, STATE_PORT)
         n_steps = None if duration is None else int(round(duration / self.model.opt.timestep))
         pacer = Pacer()
-        print(f"Listening for commands on port {CMD_PORT}; using zero command until a controller connects.")
+        print(f"Listening for commands on port {CMD_PORT}, publishing state on port {STATE_PORT}; "
+              "using zero command until a controller connects.")
 
         # whether commands are arriving, and when the last one came
         connected = False
         last_rx = None
+        warned_bad_msg = False
         try:
             # loop until the duration ends or the viewer closes
             with self._viewer() as viewer:
                 pacer.start(self.data.time)
                 next_render = time.perf_counter()
+                self.wall_start = next_render                    # for the legend's real time
+                self.rtr_last = (self.data.time, next_render)    # for the legend's real-time rate
                 k = 0
                 while (n_steps is None or k < n_steps) and (viewer is None or viewer.is_running()):
         
-                    # policy tick: read the newest command, check the timeout, query the policy
+                    # policy tick: send the state, read the newest command, check timeout, run policy
                     if k % self.decimation == 0:
+                        state_pub.send(pack_state(self.data.time, self.data.qpos, self.data.qvel))
                         try:
-                            self.set_cmd(unpack_twist(cmd_sub.recv(zmq.NOBLOCK)))
+                            cmd, self.ref = unpack_twist(cmd_sub.recv(zmq.NOBLOCK))
+                            self.set_cmd(cmd)
                             last_rx = time.perf_counter()
                             if not connected:
                                 print("Receiving commands from the controller.")
                                 connected = True
                         except zmq.Again:
                             pass
+                        except ValueError as err:
+                            # e.g. a controller from an older version of this code; keep running
+                            if not warned_bad_msg:
+                                print(f"Ignoring a malformed command ({err}). Restart the controller.")
+                                warned_bad_msg = True
         
                         # controller went quiet: fall back to zero
                         if connected and time.perf_counter() - last_rx > CMD_TIMEOUT:
                             print(f"No command for {CMD_TIMEOUT} s; using zero command.")
                             connected = False
                             self.set_cmd(np.zeros(3))
+                            self.ref = None
                         self.policy_step()
 
                     # every physics step: PD and physics, render if due, keep real time
@@ -235,6 +318,7 @@ class Simulation:
                     pacer.wait(self.data.time)
         finally:
             cmd_sub.close()
+            state_pub.close()
 
     # HELPERS
 
@@ -267,6 +351,26 @@ class Simulation:
             for t in render_threads:
                 t.join(timeout=2.0)
 
+    def draw_overlays(self, scn: mujoco.MjvScene):
+        """Append the reference ball and the commanded and actual twist arrows to `scn`, as in mjlab."""
+        # reference ball resting on the floor, if the controller sent one
+        if self.ref is not None:
+            add_sphere(scn, [self.ref[0], self.ref[1], REF_RADIUS], REF_RADIUS, REF_RGBA)
+
+        # pelvis frame; arrows are body-frame vectors drawn from above the head
+        pos = self.data.xpos[self.pelvis_id]
+        mat = self.data.xmat[self.pelvis_id].reshape(3, 3)
+        start = pos + mat @ np.array([0.0, 0.0, ARROW_HEIGHT])
+        lin_b = mat.T @ self.data.qvel[0:3]   # free-joint linear velocity is world frame
+        wz_b = self.data.qvel[5]              # free-joint angular velocity is already body frame
+
+        # commanded twist, then actual twist
+        for vec_b, rgba in (([self.cmd[0], self.cmd[1], 0.0], CMD_RGBA),
+                            ([0.0, 0.0, self.cmd[2]], CMD_RGBA),
+                            ([lin_b[0], lin_b[1], 0.0], ACT_RGBA),
+                            ([0.0, 0.0, wz_b], ACT_RGBA)):
+            add_arrow(scn, start, start + mat @ (np.asarray(vec_b) * ARROW_SCALE), rgba)
+
     def _render(self, viewer, next_render: float) -> float:
         """Sync the viewer if a frame is due; returns when the next one is due."""
         
@@ -274,19 +378,51 @@ class Simulation:
         now = time.perf_counter()
         if viewer is None or now < next_render:
             return next_render
+        viewer.user_scn.ngeom = 0
+        self.draw_overlays(viewer.user_scn)
+        self.draw_legend(viewer, now)
         viewer.sync()
         return max(next_render + 1.0 / RENDER_HZ, now)
 
+    def draw_legend(self, viewer, now: float):
+        """Timing text top-left, as in deploy_robot's simulation, and a key to the overlays top-right."""
+        # real-time rate (RTR): sim seconds advanced per wall second since the last frame (1.0 = real time)
+        last_sim, last_wall = self.rtr_last
+        rtr = (self.data.time - last_sim) / (now - last_wall) if now > last_wall else 0.0
+        self.rtr_last = (self.data.time, now)
+
+        timing = (
+            LEGEND_FONT,
+            mujoco.mjtGridPos.mjGRID_TOPLEFT,
+            f"Sim time:    {self.data.time:.2f}s\n"
+            f"Real time:   {now - self.wall_start:.2f}s\n"
+            f"RTR:         {rtr:.2f}\n"
+            f"Sim rate:    {1.0 / self.model.opt.timestep:.0f} Hz\n"
+            f"Render rate: {RENDER_HZ:.0f} Hz",
+            "",
+        )
+
+        # what the overlay colors and directions mean
+        key = (
+            LEGEND_FONT,
+            mujoco.mjtGridPos.mjGRID_TOPRIGHT,
+            "Blue arrows:\nRed arrows:\nFlat / up arrow:\nOrange ball:",
+            "commanded twist\nactual twist\nvx, vy / wz\nreference",
+        )
+        viewer.set_texts([timing, key])
+
     def save_log(self):
-        """Write the run as npz in parallel_sim.py's format, so data/plot_*.py work unchanged."""
+        """Write the run to data/data/<log_name>/ in parallel_sim.py's format and file names."""
         
         if not self.log_q:
             print("Nothing logged; no file written.")
             return
         
-        # path stem without .npz, and its folder
-        stem = self.log_path[:-4] if self.log_path.endswith(".npz") else self.log_path
-        os.makedirs(os.path.dirname(os.path.abspath(stem)), exist_ok=True)
+        # one folder per run under data/data/, next to parallel_sim's datasets
+        out_dir = os.path.join(ROOT_DIR, "data", "data", self.log_name)
+        os.makedirs(out_dir, exist_ok=True)
+        full_path = os.path.join(out_dir, "g1_23dof_data.npz")
+        rom_path = os.path.join(out_dir, "g1_rom_data.npz")
 
         # batch dimension of 1, matching parallel_sim's (B, T, dim)
         q = np.stack(self.log_q)[None].astype(np.float32)
@@ -295,9 +431,9 @@ class Simulation:
         meta = dict(sim_dt=float(self.model.opt.timestep), control_dt=float(self.cfg.control_dt))
 
         # full-order file, then reduced-order file
-        np.savez(f"{stem}_23dof.npz", q_log=q, v_log=v, cmd_log=cmd, **meta)
-        np.savez(f"{stem}_rom.npz", q_rom_log=q_to_rom(q), v_rom_log=v_to_rom(q, v), cmd_log=cmd, **meta)
-        print(f"Saved {q.shape[1]} steps to {stem}_23dof.npz and {stem}_rom.npz.")
+        np.savez(full_path, q_log=q, v_log=v, cmd_log=cmd, **meta)
+        np.savez(rom_path, q_rom_log=q_to_rom(q), v_rom_log=v_to_rom(q, v), cmd_log=cmd, **meta)
+        print(f"Saved {q.shape[1]} steps to {out_dir}/ (g1_23dof_data.npz, g1_rom_data.npz).")
 
 
 ############################################################################
@@ -308,12 +444,13 @@ def main():
 
     # parse command-line args
     parser = argparse.ArgumentParser(description="Single-robot G1 simulation, driven by a control_*.py.")
-    parser.add_argument("--log", default=None, help="save the run to this npz path stem")
+    parser.add_argument("--log", default=None, metavar="NAME",
+                        help="save the run to data/data/NAME/ when the sim exits")
     args = parser.parse_args()
 
     # build the sim and run until the viewer closes or Ctrl+C
     robot_cfg = G1Config()
-    sim = Simulation(XML_PATH, POLICY_PATH, SIM_DT, robot_cfg, log_path=args.log)
+    sim = Simulation(XML_PATH, POLICY_PATH, SIM_DT, robot_cfg, log_name=args.log)
     try:
         sim.run()
     except KeyboardInterrupt:
