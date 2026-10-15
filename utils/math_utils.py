@@ -1,6 +1,6 @@
 ##
 #
-# Usefule math utilities for the G1 humanoid simulation and policy.
+# Useful math utilities for the G1 humanoid simulation and policy.
 #
 ##
 

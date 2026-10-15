@@ -7,6 +7,7 @@ dependencies:
   - scipy>=1.15
   - matplotlib>=3.8
   - pygame
+  - pyzmq>=26
   - pytorch=2.14.1
   - setuptools<81
   - pip

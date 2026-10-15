@@ -93,7 +93,7 @@ def playback_trajectories(xml_path, q_sel, v_sel, sim_dt, idx, render_hz=50.0,
     with mujoco.viewer.launch_passive(
         model, data, show_left_ui=False, show_right_ui=False
     ) as viewer:
-        # camera matches single_sim.py
+        # camera angle matches simulation.py
         viewer.cam.azimuth = 140
         viewer.cam.elevation = -20
         viewer.cam.distance = 4.0
