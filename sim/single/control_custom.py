@@ -14,14 +14,17 @@ import warnings
 import numpy as np
 
 # custom imports (control_base puts the repo root on sys.path for the imports after it)
-from control_base import CommandSource, RobotState, run
+from control_base import ROOT_DIR, CommandSource, RobotState, run
 from policy.config import G1Config
 from utils.math_utils import gravity_from_quat, q_to_rom, v_to_rom, world_to_body
 
 # import KCF
 import sys
 from pathlib import Path
+# Support both an existing sibling checkout and the repository's submodule.
 KCF_ROOT = Path(__file__).resolve().parents[3] / "kcf"
+if not (KCF_ROOT / "mpc.py").is_file():
+    KCF_ROOT = Path(ROOT_DIR) / "KCF_MPC"
 sys.path.insert(0, str(KCF_ROOT))
 
 from mpc import create_mpc_controller, quadratic_cost

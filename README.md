@@ -11,6 +11,8 @@ Forward simulation of humanoid robot under a trained RL policies.
     (see [Asynchronous simulation and controller](#asynchronous-simulation-and-controller)).
 - `sim/parallel/` — `parallel_sim.py`, GPU-batched MuJoCo Warp rollouts that generate full-order state (`g1_23dof_data_XX.npz`) and reduced-order state (`g1_rom_data_XX.npz`) datasets.
 - `utils/` — helpers shared across the code base.
+- `KCF_MPC/` — git submodule ([StellaKombo/KCF_MPC](https://github.com/StellaKombo/KCF_MPC)): the trained KCF model and
+  the Koopman MPC that `control_custom.py` runs.
 - `data/` — generated rollout datasets and the plotting scripts:
   - `plot_23dof_data.py` — plots full-order trajectories and replays selected trajectories in a looping MuJoCo viewer.
   - `plot_rom_data.py` — plots reduced-order planar state and the body-frame cmd overlay, plus a looping 2D top-down animation.
@@ -18,12 +20,19 @@ Forward simulation of humanoid robot under a trained RL policies.
 ---
 
 ## Install
-The prerequisites are [conda](https://docs.conda.io/projects/conda/en/stable/user-guide/install/index.html) and `make`. The environment is defined in [`environment.yml`](environment.yml). From the repo root, run:
+The prerequisites are [conda](https://docs.conda.io/projects/conda/en/stable/user-guide/install/index.html), `make`, and
+[git-lfs](https://git-lfs.com) (the KCF model weights in the `KCF_MPC` submodule are stored with it). Clone with the submodule:
+```bash
+git clone --recurse-submodules <this repo's URL>
+```
+The environment is defined in [`environment.yml`](environment.yml). From the repo root, run:
 ```bash
 make install
 conda activate robot_sim
 ```
-This creates the `robot_sim` env and sets `ROBOT_SIM_ROOT_DIR` to this repo, scoped to the env.
+This fetches the `KCF_MPC` submodule if it's missing, creates the `robot_sim` env, and sets `ROBOT_SIM_ROOT_DIR` to this
+repo, scoped to the env. To move `KCF_MPC` to the latest commit on its `main`, run
+`git submodule update --remote KCF_MPC`, then commit the new pointer.
 If `environment.yml` changes, update the existing env in place:
 ```bash
 make update
