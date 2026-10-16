@@ -3,8 +3,10 @@ ENV := robot_sim
 
 .PHONY: install update uninstall
 
-# create the conda env and set ROBOT_SIM_ROOT_DIR to this repo
+# fetch the KCF_MPC submodule (its model weights need git-lfs), create the conda env, and set
+# ROBOT_SIM_ROOT_DIR to this repo
 install:
+	git submodule update --init --recursive
 	conda env create -f environment.yml
 	conda env config vars set -n $(ENV) ROBOT_SIM_ROOT_DIR="$(CURDIR)"
 

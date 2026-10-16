@@ -8,7 +8,7 @@
 import numpy as np
 
 # custom imports (control_base puts the repo root on sys.path for the imports after it)
-from control_base import CommandSource, RobotState, main
+from control_base import ROOT_DIR, CommandSource, RobotState, main
 from policy.config import G1Config
 from utils.math_utils import gravity_from_quat, q_to_rom, v_to_rom, world_to_body
 
@@ -18,7 +18,8 @@ from pathlib import Path
 # sys.path.append(str(Path(__file__).parent.parent.parent / "kcf"))
 # from kcf import G1KCF, G1KCFConfig  
 
-KCF_ROOT = Path(__file__).resolve().parents[3] / "KCF_MPC"
+# KCF_MPC is a git submodule at the repo root
+KCF_ROOT = Path(ROOT_DIR) / "KCF_MPC"
 sys.path.insert(0, str(KCF_ROOT))
 
 from mpc import create_mpc_controller
