@@ -1,318 +1,208 @@
 ##
 #
-#  KCF origin controller -> body-frame [vx, vy, wz].
-#  Run simulation.py separately, then this file (CPU defaults to one Torch thread).
-#  --max-input-rate and --input-delta-weight control command smoothing.
+#  Custom controller: KCF MPC -> body-frame [vx, vy, wz].
 #
 ##
 
 # standard imports
+from pathlib import Path
+import sys
 from time import perf_counter
-import argparse
-import warnings
 
+# third-party imports
 import numpy as np
+import torch
+from scipy.optimize import OptimizeResult  # Failure metadata only, not another optimizer.
 
-# custom imports (control_base puts the repo root on sys.path for the imports after it)
-from control_base import ROOT_DIR, CommandSource, RobotState, run
+# control_base puts the robot_sim root on sys.path
+from control_base import ROOT_DIR, CommandSource, RobotState, main
 from policy.config import G1Config
 from utils.math_utils import gravity_from_quat, q_to_rom, v_to_rom, world_to_body
 
-# import KCF
-import sys
-from pathlib import Path
-# Support both an existing sibling checkout and the repository's submodule.
-KCF_ROOT = Path(__file__).resolve().parents[3] / "kcf"
-if not (KCF_ROOT / "mpc.py").is_file():
-    KCF_ROOT = Path(ROOT_DIR) / "KCF_MPC"
+KCF_ROOT = Path(ROOT_DIR) / "KCF_MPC"
 sys.path.insert(0, str(KCF_ROOT))
 
-from mpc import create_mpc_controller, quadratic_cost
 from config.mpc_config import get_default_mpc_config
-from scipy.optimize import OptimizeResult, minimize
-import torch
+from mpc import create_mpc_controller
+
 
 ############################################################################
 # KCF CLOSED-LOOP STATE
 ############################################################################
 
-def g1_closed_loop_state(state: RobotState, gait_period: float, theta_prev: float | None = None) -> np.ndarray:
-    """84-D observation in the saved KCF checkpoint's training convention.
+def g1_closed_loop_state(state: RobotState, gait_period: float,
+                         theta_prev: float | None = None) -> np.ndarray:
+    """84-D Markov state of the full-order KCF model, as in the training data.
 
-    Single-tick version of the batched _g1_build_closed_loop_state, with the same layout:
-    [px, py, theta] (3), [vx, vy, wz] (3), pz (1), gravity (3), joint q (23), [vz, wx, wy] (3),
-    joint v (23), gait [sin, cos] (2), previous action (23, state.prev_action). The batched version
-    unwraps theta over time, so pass the previous tick's theta (x[2]) as theta_prev, or None at first.
+    [px, py, theta] (3), [vx, vy, wz] (3), pz (1), gravity (3), joint q (23),
+    [vz, wx, wy] (3), joint v (23), gait [sin, cos] (2), previous action (23).
+    Pass the previous tick's theta to unwrap yaw across consecutive states.
     """
-    # float32, like the logged datasets the batched version reads
     q = state.q.astype(np.float32)
     v = state.v.astype(np.float32)
     quat = q[3:7]
-
-    # planar pose, with yaw unwrapped against the previous tick, and planar twist
     planar_pose = q_to_rom(q).astype(np.float32, copy=False)
     if theta_prev is not None:
         planar_pose[2] = np.unwrap(np.array([theta_prev, planar_pose[2]], dtype=np.float32))[1]
     planar_velocity = v_to_rom(q, v).astype(np.float32, copy=False)
-
-    # projected gravity, and the base velocities the planar twist leaves out; same frame
-    # handling as the batched version (and v_to_rom), so the features match the training data
     gravity = gravity_from_quat(quat)
-    linear_body = world_to_body(quat, v[0:3])
-    # Preserve the exact training features, even though qvel angular velocity is
-    # already body-frame in MuJoCo. Changing this alone would mismatch the weights.
+    linear_body = world_to_body(quat, v[:3])
+    # Preserve the checkpoint's velocity convention, including this rotation.
     angular_body = world_to_body(quat, v[3:6])
-    remaining_base_velocity = np.array([linear_body[2], angular_body[0], angular_body[1]], dtype=np.float32)
-
-    # gait clock from sim time
+    remaining_base_velocity = np.array(
+        [linear_body[2], angular_body[0], angular_body[1]], dtype=np.float32
+    )
     phase = np.remainder(state.t, gait_period) / gait_period
-    gait_phase = np.array([np.sin(2.0 * np.pi * phase), np.cos(2.0 * np.pi * phase)], dtype=np.float32)
-
+    gait = np.array([np.sin(2 * np.pi * phase), np.cos(2 * np.pi * phase)], dtype=np.float32)
     return np.concatenate([planar_pose, planar_velocity, q[2:3], gravity, q[7:],
-                           remaining_base_velocity, v[6:], gait_phase,
-                           state.prev_action.astype(np.float32)])
+                           remaining_base_velocity, v[6:], gait, state.prev_action.astype(np.float32)])
 
 
 ############################################################################
 # CONTROLLER
 ############################################################################
 
-class CustomCommand(CommandSource):
-    """KCF MPC holding the origin, returning body-frame [vx, vy, wz]."""
 
-    def __init__(self, cmd_scale: np.ndarray, mpc_config=None,
-                 max_input_rate: float = 1.5, input_delta_weight: float = 1.0,
-                 verbose: bool = False):
-        
+class CustomCommand(CommandSource):
+    """Track reference() using the existing KCF MPC; hold the origin for now.
+
+    Keep the baseline's reference and Lissajous functions. The optimizer,
+    rollout, cost and existing input bounds belong to KCF_MPC/mpc.py.
+    """
+
+    def __init__(self, cmd_scale: np.ndarray, *, quiet: bool = False, verbose: bool = False):
         super().__init__(cmd_scale)
         self.cfg = G1Config()
-
-        # MPC controller
         settings = get_default_mpc_config()
-        settings["device"] = "cpu"
-        # Prioritize returning to the origin while still penalizing speed at the target.
-        settings["state_weights"] = (10.0, 10.0, 2.0, 1.0, 1.0, 1.0)
-        if mpc_config is not None:
-            settings.update(mpc_config)
+        threads = int(settings["num_threads"])
+        if threads < 1:
+            raise ValueError("MPC num_threads must be positive")
+        torch.set_num_threads(threads)
         self.mpc = create_mpc_controller(settings)
+
+        dtypes = {"float32": torch.float32, "float64": torch.float64}
+        dtype = dtypes[settings["dtype"]]
+        self.mpc.model.to(dtype=dtype)
+        self.mpc.dtype = dtype
+        self.mpc.state_weights = self.mpc.state_weights.to(dtype=dtype)
         if (self.mpc.model.config.state_dim != 84 or self.mpc.model.config.L_embed != 0
                 or self.mpc.input_dim != 3
                 or tuple(self.mpc.tracked_state_indices.cpu().tolist()) != (0, 1, 2, 3, 4, 5)):
-            raise ValueError("G1 controller requires an 84-input-state model tracking ROM6 with three controls")
+            raise ValueError("G1 requires the 84-state checkpoint tracking ROM6 with three commands")
         if np.any(self.mpc.lower_bounds < -self.cmd_scale) or np.any(self.mpc.upper_bounds > self.cmd_scale):
-            raise ValueError("MPC input bounds exceed the simulator command limits")
+            raise ValueError("MPC input bounds exceed the simulator's command limits")
+        self.reference_state = np.asarray(settings["reference"], dtype=np.float64)
+        if self.reference_state.shape != (6,) or not np.isfinite(self.reference_state).all():
+            raise ValueError("MPC reference must contain six finite ROM values")
         self.N = self.mpc.horizon
-        self.dt = self.cfg.control_dt   # [s] MPC step, the same as the KCF model_dt
-
-        # KCF closed-loop state: gait period from the policy config, and last tick's unwrapped yaw
+        self.dt = self.cfg.control_dt
         self.gait_period = self.cfg.gait_period
-        self.theta_prev = None
-        self.previous_command = np.zeros(3, dtype=np.float32)
-        self.last_state_time = None
-        self.last_observation = None
-        self.start_time_seen = None
+        # Retain the baseline's optional trajectory; it is not active for origin holding.
+        trajectory = settings["lissajous_reference"]
+        self.half_width_ref = float(trajectory["half_width"])
+        self.half_height_ref = float(trajectory["half_height"])
+        self.omega_ref = float(trajectory["omega"])
+        self.quiet, self.verbose = quiet, verbose
+        self.solve_count = self.failure_count = self.deadline_miss_count = 0
         self.solve_time = 0.0
-        self.verbose = verbose
-        self.max_input_rate = float(max_input_rate)
-        self.input_delta_weight = float(input_delta_weight)
-        if not np.isfinite(self.max_input_rate) or self.max_input_rate <= 0:
-            raise ValueError("max_input_rate must be finite and positive")
-        if not np.isfinite(self.input_delta_weight) or self.input_delta_weight < 0:
-            raise ValueError("input_delta_weight must be finite and non-negative")
-
-        # Lissajous curve size and rate: one loop every 2 pi / w seconds
-        self.half_width_ref = 1.5    # [m] a: reaches x = +-a
-        self.half_height_ref = 0.75  # [m] b: each lobe reaches y = +-b
-        self.omega_ref = 0.25         # [rad/s] w
-
-        # # PD gains on planar position and on heading
-        # self.kp_pos, self.kd_pos = 1.0, 0.2
-        # self.kp_yaw, self.kd_yaw = 2.0, 0.1
+        self.reset()
+        if not self.quiet:
+            print(f"Using {KCF_ROOT / 'mpc.py'} (L-BFGS-B); "
+                  f"settings from {KCF_ROOT / 'config' / 'mpc_config.py'}", flush=True)
 
     def reference(self, t):
-        """Reference at controller time t [s], a scalar or an array: zero for now, i.e. hold the origin.
+        """Reference pose and twist at scalar/array controller time t; hold zero for now.
 
-        Returns (q_ref, v_ref), each (..., 3): pose [px, py, theta] and twist [vx, vy, wz].
-        To track the Lissajous curve instead, return self.lissajous_reference(t).
+        Returns (q_ref, v_ref), each (..., 3): world pose [px, py, theta]
+        and world twist [vx, vy, wz]. Values are loaded from the MPC config.
+        To track the baseline's curve later, return self.lissajous_reference(t).
         """
-        zeros = np.zeros(np.shape(t) + (3,))
-        return zeros, zeros.copy()
+        shape = np.shape(t) + (3,)
+        return (np.broadcast_to(self.reference_state[:3], shape).copy(),
+                np.broadcast_to(self.reference_state[3:], shape).copy())
 
     def lissajous_reference(self, t):
-        """Lissajous reference at controller time t [s], a scalar or an array, in the world frame.
-
-        Returns (q_ref, v_ref), each (..., 3): pose [px, py, theta] and twist [vx, vy, wz], with
-        theta along the curve's tangent, in (-pi, pi].
-        """
+        """Baseline Lissajous pose/twist in the world frame, with tangent heading."""
         a, b, w = self.half_width_ref, self.half_height_ref, self.omega_ref
         t = np.asarray(t, dtype=np.float64)
-
-        # position, velocity, and acceleration along the curve
         px, py = a * np.sin(w * t), b * np.sin(2 * w * t)
         vx, vy = a * w * np.cos(w * t), 2 * b * w * np.cos(2 * w * t)
         ax, ay = -a * w**2 * np.sin(w * t), -4 * b * w**2 * np.sin(2 * w * t)
-
-        # heading along the tangent, and its rate from the curvature (speed is never zero here)
         theta = np.arctan2(vy, vx)
         wz = (vx * ay - vy * ax) / (vx**2 + vy**2)
         return np.stack([px, py, theta], axis=-1), np.stack([vx, vy, wz], axis=-1)
 
     def reset(self):
         self.theta_prev = None
-        self.previous_command[:] = 0.0
         self.last_state_time = None
         self.last_observation = None
+        self.previous_command = np.zeros(3, dtype=np.float32)
         self.start_time_seen = self.t_start
         self.mpc.reset()
-
-    def _fallback(self, reason):
-        change = self.max_input_rate * self.dt
-        command = np.sign(self.previous_command) * np.maximum(np.abs(self.previous_command) - change, 0.0)
-        command = np.clip(command, self.mpc.lower_bounds, self.mpc.upper_bounds)
-        self.mpc.reset()
-        self.mpc_result = OptimizeResult(success=False, used_fallback=True, message=str(reason))
-        return command.astype(np.float32)
-
-    def _solve(self, observation, reference):
-        """Use the saved KCF dynamics with local smoothing and solver-result checks."""
-        mpc = self.mpc
-        x = torch.as_tensor(observation, device=mpc.device, dtype=mpc.dtype)
-        ref = torch.as_tensor(reference, device=mpc.device, dtype=mpc.dtype)
-        previous = torch.as_tensor(self.previous_command, device=mpc.device, dtype=mpc.dtype)
-        if x.shape != (84,) or ref.shape != (self.N, 6):
-            raise ValueError("Unexpected MPC state or reference shape")
-        if not torch.isfinite(x).all() or not torch.isfinite(ref).all():
-            raise FloatingPointError("Non-finite MPC observation or reference")
-        with torch.no_grad():
-            lifted = mpc.model.lift(x[None]).squeeze(0)
-
-        def objective(flat_controls):
-            controls = torch.tensor(flat_controls.reshape(self.N, 3), device=mpc.device,
-                                    dtype=mpc.dtype, requires_grad=True)
-            cost = quadratic_cost(mpc.model, lifted, controls, ref,
-                                  mpc.tracked_state_indices, mpc.state_weights, mpc.input_weight)
-            changes = torch.cat((controls[:1] - previous, controls[1:] - controls[:-1]))
-            cost = cost + self.input_delta_weight * changes.square().sum()
-            gradient, = torch.autograd.grad(cost, controls)
-            if not torch.isfinite(cost) or not torch.isfinite(gradient).all():
-                raise FloatingPointError("Non-finite MPC cost or gradient")
-            return float(cost.detach().cpu()), gradient.detach().cpu().numpy().astype(np.float64).ravel()
-
-        lower = np.tile(mpc.lower_bounds, self.N)
-        upper = np.tile(mpc.upper_bounds, self.N)
-        change = self.max_input_rate * self.dt
-        lower[:3] = np.maximum(lower[:3], self.previous_command - change)
-        upper[:3] = np.minimum(upper[:3], self.previous_command + change)
-        guess = np.clip(mpc._initial_guess().ravel(), lower, upper)
-        initial_cost, _ = objective(guess)
-        result = minimize(objective, guess, method="L-BFGS-B", jac=True,
-                          bounds=list(zip(lower, upper)), options={
-                              "maxiter": mpc.max_iterations,
-                              "ftol": mpc.function_tolerance,
-                              "gtol": mpc.gradient_tolerance})
-        candidate = np.asarray(result.x, dtype=np.float64)
-        if not result.success:
-            return self._fallback(result.message)
-        if (candidate.shape != (self.N * 3,) or not np.isfinite(candidate).all()
-                or np.any(candidate < lower - 1e-7) or np.any(candidate > upper + 1e-7)):
-            return self._fallback("Optimizer returned invalid or infeasible controls")
-        candidate = np.clip(candidate, lower, upper)
-        cost, _ = objective(candidate)
-        if cost > initial_cost + 1e-6 * max(1.0, abs(initial_cost)):
-            return self._fallback("Optimizer increased the objective")
-        solution = candidate.reshape(self.N, 3)
-        mpc.previous_solution = solution.copy()
-        result.used_fallback = False
-        self.mpc_result = result
-        return solution[0].astype(np.float32)
 
     def get(self, state: RobotState) -> np.ndarray:
         if (self.start_time_seen != self.t_start
                 or (self.last_state_time is not None and state.t < self.last_state_time)):
             self.reset()
+        # Controller clock and 84-D observation follow the original baseline.
+        t = state.t - self.t_start
         x_kcf = g1_closed_loop_state(state, self.gait_period, self.theta_prev)
         if self.last_state_time == state.t:
             if np.array_equal(x_kcf, self.last_observation):
                 return self.previous_command.copy()
             self.mpc.reset()
+        interval = None if self.last_state_time is None else state.t - self.last_state_time
         if np.isfinite(x_kcf[2]):
             self.theta_prev = float(x_kcf[2])
-        t = state.t - self.t_start
-        q_ref, v_ref = self.reference(t + self.dt * np.arange(1, self.N + 1))
-        reference = np.concatenate([q_ref, v_ref], axis=-1).astype(np.float32)
-        self.ref = q_ref[0, :2]
+        # The MPC predicts x[k+1] ... x[k+N], not the current state x[k].
+        t_horizon = t + self.dt * np.arange(1, self.N + 1)
+        q_ref, v_ref = self.reference(t_horizon)
+        # Reference functions return world velocity; KCF's ROM twist is body-frame.
+        cos_yaw, sin_yaw = np.cos(q_ref[:, 2]), np.sin(q_ref[:, 2])
+        v_ref_body = np.stack([cos_yaw * v_ref[:, 0] + sin_yaw * v_ref[:, 1],
+                               -sin_yaw * v_ref[:, 0] + cos_yaw * v_ref[:, 1],
+                               v_ref[:, 2]], axis=-1)
+        x_ref = np.concatenate([q_ref, v_ref_body], axis=-1)  # (N, 6), as solve expects
+        self.ref = q_ref[0, :2].copy()
         began = perf_counter()
         try:
-            command = self._solve(x_kcf, reference)
-        except (FloatingPointError, RuntimeError) as error:
-            command = self._fallback(error)
+            # The sole optimization call: KCF's original cost and L-BFGS-B solver.
+            u_seq, result = self.mpc.solve(x_kcf, x_ref)
+            result.used_fallback = not result.success
+            if not result.success:
+                command = np.zeros(3, dtype=np.float32)
+                self.mpc.reset()
+            else:
+                command = np.asarray(u_seq[0], dtype=np.float32)
+                if (not np.isfinite(command).all()
+                        or np.any(command < self.mpc.lower_bounds - 1e-7)
+                        or np.any(command > self.mpc.upper_bounds + 1e-7)):
+                    raise RuntimeError("KCF MPC returned an invalid or out-of-bounds command")
+        except (FloatingPointError, RuntimeError, ValueError) as error:
+            command = np.zeros(3, dtype=np.float32)
+            result = OptimizeResult(success=False, used_fallback=True, message=str(error))
+            self.mpc.reset()
         self.solve_time = perf_counter() - began
-        if self.mpc_result.used_fallback:
-            warnings.warn(f"MPC fallback at sim t={state.t:.3f}: {self.mpc_result.message}")
+        self.mpc_result = result
+        self.solve_count += 1
+        self.failure_count += int(not result.success)
+        self.deadline_miss_count += int(self.solve_time > self.dt)
+        self.last_state_time, self.last_observation = state.t, x_kcf.copy()
         self.previous_command = command.copy()
-        self.last_state_time = state.t
-        self.last_observation = x_kcf.copy()
-        if self.verbose:
-            status = "fallback" if self.mpc_result.used_fallback else "converged"
-            print(f"t={state.t:.3f}s solve={self.solve_time:.3f}s {status} u={command}")
+        if not self.quiet or self.verbose or not result.success:
+            status = "converged" if result.success else "fallback"
+            state_dt = "n/a" if interval is None else f"{interval:.3f}s"
+            print(f"[MPC L-BFGS-B] t={state.t:.3f}s state_dt={state_dt} "
+                  f"compute={1000 * self.solve_time:.1f}ms iterations={result.get('nit', 'n/a')} "
+                  f"evaluations={result.get('nfev', 'n/a')} status={status} "
+                  f"failures={self.failure_count}/{self.solve_count} "
+                  f"overruns={self.deadline_miss_count}/{self.solve_count} "
+                  f"position_error={np.linalg.norm(state.q[:2] - self.ref):.3f}m",
+                  flush=True)
+            if self.verbose or not result.success:
+                print(f"      command={command} reason={result.message}", flush=True)
         return command.copy()
-
-        # # unpack full state
-        # qpos_base = state.q[:7]
-        # qvel_base = state.v[:6]
-        # # qpos_joints = state.q[7:]  # not used  
-        # # qvel_joints = state.v[6:]  # not used
-
-        # # unpack planar dynamics state
-        # px, py = qpos_base[:2]    # planar positions
-        # vx, vy = qvel_base[:2]    # planar velocities
-        # wz = qvel_base[5]         # base frame ang vel
-        # qw, qx, qy, qz = qpos_base[3:7] # base quat
-        # theta = np.arctan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))  # yaw [rad]
-
-        # # reference pose and twist on the Lissajous curve
-        # (px_ref, py_ref, theta_ref), (vx_ref, vy_ref, wz_ref) = self.reference(t)
-        # self.ref = [px_ref, py_ref]   # drawn as a ball in the sim
-
-        # # PD on planar position, in the world frame, on top of the reference velocity
-        # vx_cmd = vx_ref + self.kp_pos * (px_ref - px) + self.kd_pos * (vx_ref - vx)
-        # vy_cmd = vy_ref + self.kp_pos * (py_ref - py) + self.kd_pos * (vy_ref - vy)
-
-        # # PD on heading, with the angle error wrapped to [-pi, pi]
-        # yaw_err = np.arctan2(np.sin(theta_ref - theta), np.cos(theta_ref - theta))
-        # wz_cmd = wz_ref + self.kp_yaw * yaw_err + self.kd_yaw * (wz_ref - wz)
-
-        # # rotate the planar velocity command into the body frame
-        # vx_body =  np.cos(theta) * vx_cmd + np.sin(theta) * vy_cmd
-        # vy_body = -np.sin(theta) * vx_cmd + np.cos(theta) * vy_cmd
-
-
-
-def main():
-    parser = argparse.ArgumentParser(description="G1 KCF controller holding the origin")
-    parser.add_argument("--device", default="cpu", help="PyTorch device (default: cpu)")
-    parser.add_argument("--threads", type=int, default=1, help="CPU PyTorch threads (default: 1)")
-    parser.add_argument("--results-dir", type=Path, default=None, help="override the saved model directory")
-    parser.add_argument("--max-input-rate", type=float, default=1.5,
-                        help="command slew rate in units/s of model time (default: 1.5)")
-    parser.add_argument("--input-delta-weight", type=float, default=1.0, help="command-change penalty")
-    parser.add_argument("--position-weight", type=float, default=10.0, help="weight on x/y position errors")
-    parser.add_argument("--verbose", action="store_true", help="show solve times, commands, and status")
-    args = parser.parse_args()
-    if args.threads < 1:
-        parser.error("--threads must be positive")
-    torch.set_num_threads(args.threads)
-    config = {"device": args.device,
-              "state_weights": (args.position_weight, args.position_weight, 2.0, 1.0, 1.0, 1.0)}
-    if args.results_dir is not None:
-        config["results_dir"] = str(args.results_dir.resolve())
-    cfg = G1Config()
-    source = CustomCommand(cfg.cmd_scale, config, args.max_input_rate, args.input_delta_weight, args.verbose)
-    try:
-        run(source, cfg)
-    finally:
-        source.close()
 
 
 if __name__ == "__main__":
-    main()
+    main(CustomCommand, "G1 custom controller: KCF L-BFGS-B MPC")
