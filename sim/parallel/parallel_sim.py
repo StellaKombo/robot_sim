@@ -458,19 +458,19 @@ if __name__ == "__main__":
 
     # rollout parameters
     batch_size = 1024
-    sim_dt_des = 0.002  # dt for simulation (too coarse causes sim instability)
-    duration = 5.0      # [s] rollout length; logged every 1/--log_hz seconds
+    sim_dt_des = 0.002  # dt for simulation (too coarse causes sim instability) - DO NOT CHANGE!!
+    duration = 1.0      # [s] rollout length; 501 samples at the default 500 Hz logging rate
 
     # number of datasets to generate
-    N_datasets = 3
+    N_datasets = 20
 
     # cmd randomization: resample per-env cmd every N policy queries (None = resample every control query)
     # at control_dt=0.02 s, 125 queries = 2.5 s of hold per ZOH window
-    cmd_zoh_steps = 125
+    cmd_zoh_steps = 50
 
-    # random seed
-    # seed = 0
-    seed = int(time.time())
+    # random /fixed seed
+    seed = 2
+    #seed = int(time.time())
 
     # create the config for parallel sim
     config = ParallelSimConfig(
@@ -515,38 +515,73 @@ if __name__ == "__main__":
         print(f"  v_rom_log:   {v_rom_log_np.shape}")
 
         # full-order save
-        np.savez(save_path,
-                 sim_dt=float(r.sim_dt),
-                 control_dt=float(r.control_dt),
-                 log_dt=float(r.log_dt),
-                 q_log=q_log_np,
-                 v_log=v_log_np,
-                 cmd_log=cmd_log_np)
+        np.savez(
+            save_path,
+            sim_dt=float(r.sim_dt),
+            control_dt=float(r.control_dt),
+            log_dt=float(r.log_dt),
+            batch_size=int(batch_size),
+            T=int(T),
+            N_datasets=int(N_datasets),
+            cmd_zoh_steps=int(cmd_zoh_steps),
+            seed=int(seed),
+            q_log=q_log_np,
+            v_log=v_log_np,
+            cmd_log=cmd_log_np,
+        )
         print(f"  Saved full-order to: {save_path}")
 
         # ROM save
-        np.savez(rom_save_path,
-                 sim_dt=float(r.sim_dt),
-                 control_dt=float(r.control_dt),
-                 log_dt=float(r.log_dt),
-                 q_rom_log=q_rom_log_np,
-                 v_rom_log=v_rom_log_np,
-                 cmd_log=cmd_log_np)
+        np.savez(
+            rom_save_path,
+            sim_dt=float(r.sim_dt),
+            control_dt=float(r.control_dt),
+            log_dt=float(r.log_dt),
+            batch_size=int(batch_size),
+            T=int(T),
+            N_datasets=int(N_datasets),
+            cmd_zoh_steps=int(cmd_zoh_steps),
+            seed=int(seed),
+            q_rom_log=q_rom_log_np,
+            v_rom_log=v_rom_log_np,
+            cmd_log=cmd_log_np,
+        )
         print(f"  Saved ROM to:        {rom_save_path}")
 
         return rollout_time
 
-    # generate numbered datasets: <env_name>_data_XX.npz (full order)
-    #                             <rom_env_name>_data_XX.npz (ROM)
+    # generate numbered datasets with generation settings in the filename:
+        #   full-order: <env_name>_B<batch_size>_T<T>_zoh<cmd_zoh_steps>_seed<seed>_data_XX.npz
+        #   ROM:        <rom_env_name>_B<batch_size>_T<T>_zoh<cmd_zoh_steps>_seed<seed>_data_XX.npz
+
     tot_time = 0.0
     save_dir = os.path.join(ROOT_DIR, "data", "data")
     os.makedirs(save_dir, exist_ok=True)
 
     for i in range(N_datasets):
-        save_path = f"{save_dir}/{env_name}_data_{i+1:02d}.npz"
-        rom_save_path = f"{save_dir}/{rom_env_name}_data_{i+1:02d}.npz"
-        tot_time += rollout_and_save_dataset(save_path, rom_save_path, f"dataset {i+1}/{N_datasets}")
+        save_path = (
+            f"{save_dir}/{env_name}"
+            f"_B{batch_size}"
+            f"_T{T}"
+            f"_zoh{cmd_zoh_steps}"
+            f"_seed{seed}"
+            f"_data_{i+1:02d}.npz"
+        )
 
+        rom_save_path = (
+            f"{save_dir}/{rom_env_name}"
+            f"_B{batch_size}"
+            f"_T{T}"
+            f"_zoh{cmd_zoh_steps}"
+            f"_seed{seed}"
+            f"_data_{i+1:02d}.npz"
+        )
+
+        tot_time += rollout_and_save_dataset(
+            save_path,
+            rom_save_path,
+            f"dataset {i+1}/{N_datasets}",
+        )
     print(f"\nFinished generating {N_datasets} datasets.")
     print(f"Total rollout time: {tot_time:.1f}s")
     print(f"Total trajectories: {N_datasets * batch_size}")

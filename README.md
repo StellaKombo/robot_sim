@@ -36,6 +36,7 @@ repo, scoped to the env. To move `KCF_MPC` to the latest commit on its `main`, r
 If `environment.yml` changes, update the existing env in place:
 ```bash
 make update
+
 ```
 To remove the environment:
 ```bash
