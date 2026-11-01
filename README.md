@@ -69,6 +69,8 @@ Terminal 2 (pick one):
 python sim/single/control_kb.py        # keyboard
 python sim/single/control_joy.py       # joystick
 python sim/single/control_custom.py    # your own logic
+python sim/single/control_custom.py --integrated-pose --lissajous  # KCF-MPC curve tracking
+python sim/single/control_custom.py --single-integrator --lissajous  # ideal-model comparison
 ```
 
 #### Choosing the command source
@@ -76,7 +78,10 @@ python sim/single/control_custom.py    # your own logic
   is `vy`, and `+`/`-` set the speed from 0.1x to 1.0x. Keys only register while the window has focus.
   It turns red when it doesn't, so click it.
 - `control_joy.py`: Xbox controller. Left stick is `vx`, `vy`, and the right stick is `wz`.
-- `control_custom.py`: your own logic in `CustomCommand.get(state)`. Copy it to add another controller.
+- `control_custom.py`: KCF-MPC control. It holds the fixed target by default; add `--lissajous` to track
+  the configured Lissajous pose-and-velocity reference, and add `--integrated-pose` to use the
+  velocity-integrated KCF pose estimate. Use `--single-integrator` instead of `--integrated-pose`
+  to run the same MPC problem with an ideal body-twist kinematic predictor.
 
 `state` holds sim time `t`, the robot's full `q` and `v`, and `prev_action`, the 23-D policy action from
 the previous 50 Hz policy tick (the one in the policy's next observation). In `v`, the base's linear

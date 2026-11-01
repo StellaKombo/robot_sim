@@ -50,5 +50,5 @@ class G1Config:
     stand_cmd_threshold: float = 0.0 # set to 0.0 to always moving feet
 
     # velocity command [vx, vy, omega]
-    cmd_scale: np.ndarray = field(default_factory=lambda: np.array([0.75, 0.75, 0.75]))
+    cmd_scale: np.ndarray = field(default_factory=lambda: np.array([1.0, 1.0, 0.75]))
     cmd: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float32))

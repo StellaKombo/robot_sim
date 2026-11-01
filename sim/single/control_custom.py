@@ -91,18 +91,33 @@ def _configure_cpu_affinity(cpus):
     return tuple(sorted(selected))
 
 
-def resolve_mpc_settings(*, integrated_pose: bool = False):
-    """Load normal MPC settings, optionally forcing velocity-integrated pose.
+def resolve_mpc_settings(*, integrated_pose: bool = False,
+                         reference_mode: str | None = None,
+                         prediction_model: str | None = None):
+    """Load MPC settings with optional process-local pose/reference overrides.
 
-    The override is process-local. It does not edit ``mpc_config.py`` and it is
-    deliberately one-way: omitting the flag preserves whichever mode the
-    caller supplied, including a saved visual-trial plan.
+    The overrides do not edit ``mpc_config.py``. Omitting either one preserves
+    the configured value, including values supplied by a saved trial plan.
     """
     settings = get_default_mpc_config()
+    selected_model = (
+        settings.get("prediction_model", "kcf")
+        if prediction_model is None else prediction_model
+    )
+    if selected_model not in ("kcf", "single_integrator"):
+        raise ValueError("prediction_model must be 'kcf' or 'single_integrator'")
+    if integrated_pose and selected_model != "kcf":
+        raise ValueError("--integrated-pose cannot be combined with --single-integrator")
+    if prediction_model is not None:
+        settings["prediction_model"] = selected_model
     if integrated_pose:
         settings["pose_prediction"] = dict(
             settings["pose_prediction"], mode="integrated_velocity"
         )
+    if reference_mode is not None:
+        if reference_mode not in ("fixed", "lissajous"):
+            raise ValueError("reference_mode must be 'fixed' or 'lissajous'")
+        settings["reference_mode"] = reference_mode
     return settings
 
 
@@ -110,27 +125,44 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="G1 custom controller: KCF L-BFGS-B MPC (pair with simulation.py)."
     )
-    parser.add_argument(
+    predictor = parser.add_mutually_exclusive_group()
+    predictor.add_argument(
         "--integrated-pose",
         action="store_true",
         help="Integrate unchanged KCF body-velocity predictions for MPC pose tracking",
+    )
+    predictor.add_argument(
+        "--single-integrator",
+        action="store_true",
+        help="Use ideal body-twist single-integrator prediction instead of KCF",
+    )
+    parser.add_argument(
+        "--lissajous",
+        action="store_true",
+        help="Track the configured Lissajous pose/twist trajectory instead of a fixed target",
     )
     return parser.parse_args(argv)
 
 
 class CustomCommand(CommandSource):
-    """Track reference() using the existing KCF MPC; hold the origin for now.
+    """Track a fixed or Lissajous reference using the selected MPC predictor.
 
-    Keep the baseline's reference and Lissajous functions. The optimizer,
-    cost and existing input bounds belong to KCF_MPC/mpc.py. Its JAX backend
-    compiles joint cost-and-gradient evaluations for SciPy L-BFGS-B.
+    The optimizer, cost and existing input bounds belong to KCF_MPC/mpc.py.
+    Its JAX backend compiles joint cost-and-gradient evaluations for SciPy
+    L-BFGS-B.
     """
 
     def __init__(self, cmd_scale: np.ndarray, *, quiet: bool = False, verbose: bool = False,
-                 feedback_is_synchronous: bool = False, integrated_pose: bool = False):
+                 feedback_is_synchronous: bool = False, integrated_pose: bool = False,
+                 reference_mode: str | None = None,
+                 prediction_model: str | None = None):
         super().__init__(cmd_scale)
         self.cfg = G1Config()
-        settings = resolve_mpc_settings(integrated_pose=integrated_pose)
+        settings = resolve_mpc_settings(
+            integrated_pose=integrated_pose,
+            reference_mode=reference_mode,
+            prediction_model=prediction_model,
+        )
         self.cpu_affinity = _configure_cpu_affinity(settings.get("cpu_affinity"))
         threads = int(settings["num_threads"])
         if threads < 1:
@@ -142,23 +174,47 @@ class CustomCommand(CommandSource):
             self.backend_label += f"/{self.mpc.jax_platform}"
         self.backend_label += f"/{str(self.mpc.dtype).removeprefix('torch.')}/{self.mpc.solver}-lbfgsb"
 
+        expected_tracked_indices = (0, 1, 2, 3, 4, 5, 7, 8, 9)
         if (self.mpc.model.config.state_dim != 84 or self.mpc.model.config.L_embed != 0
                 or self.mpc.input_dim != 3
-                or tuple(self.mpc.tracked_state_indices.cpu().tolist()) != (0, 1, 2, 3, 4, 5)):
-            raise ValueError("G1 requires the 84-state checkpoint tracking ROM6 with three commands")
+                or tuple(self.mpc.tracked_state_indices.cpu().tolist()) != expected_tracked_indices):
+            raise ValueError(
+                "G1 requires the 84-state checkpoint tracking planar ROM6 and gravity "
+                "with three commands"
+            )
         if np.any(self.mpc.lower_bounds < -self.cmd_scale) or np.any(self.mpc.upper_bounds > self.cmd_scale):
             raise ValueError("MPC input bounds exceed the simulator's command limits")
         self.reference_state = np.asarray(settings["reference"], dtype=np.float64)
-        if self.reference_state.shape != (6,) or not np.isfinite(self.reference_state).all():
-            raise ValueError("MPC reference must contain six finite ROM values")
+        self.tracked_dim = len(expected_tracked_indices)
+        if (self.reference_state.shape != (self.tracked_dim,)
+                or not np.isfinite(self.reference_state).all()):
+            raise ValueError(
+                "MPC reference must contain nine finite planar pose, twist, and gravity values"
+            )
         self.N = self.mpc.horizon
         self.dt = self.cfg.control_dt
         self.gait_period = self.cfg.gait_period
-        # Retain the baseline's optional trajectory; it is not active for origin holding.
+        self.reference_mode = settings.get("reference_mode", "fixed")
+        if self.reference_mode not in ("fixed", "lissajous"):
+            raise ValueError("MPC reference_mode must be 'fixed' or 'lissajous'")
         trajectory = settings["lissajous_reference"]
-        self.half_width_ref = float(trajectory["half_width"])
-        self.half_height_ref = float(trajectory["half_height"])
-        self.omega_ref = float(trajectory["omega"])
+        try:
+            raw_trajectory = (
+                trajectory["half_width"], trajectory["half_height"], trajectory["omega"]
+            )
+            self.half_width_ref, self.half_height_ref, self.omega_ref = map(
+                float, raw_trajectory
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(
+                "lissajous_reference requires half_width, half_height, and omega"
+            ) from error
+        if (any(isinstance(value, bool) for value in raw_trajectory)
+                or not np.isfinite(
+                    [self.half_width_ref, self.half_height_ref, self.omega_ref]
+                ).all()
+                or min(self.half_width_ref, self.half_height_ref, self.omega_ref) <= 0.0):
+            raise ValueError("Lissajous dimensions and omega must be finite and positive")
         self.quiet, self.verbose = quiet, verbose
         self.solve_count = self.failure_count = self.deadline_miss_count = 0
         self.solver_failure_count = self.stale_rejections = self.reset_discards = 0
@@ -187,7 +243,7 @@ class CustomCommand(CommandSource):
         trace_options = settings["live_trace"]
         self._trace = (MPCSolveTrace(
             trace_options, settings, state_dim=self.mpc.model.config.state_dim,
-            horizon=self.N, input_dim=self.mpc.input_dim, tracked_dim=6)
+            horizon=self.N, input_dim=self.mpc.input_dim, tracked_dim=self.tracked_dim)
             if trace_options["enabled"] else None)
         self._worker = None
         self._console = None
@@ -200,7 +256,9 @@ class CustomCommand(CommandSource):
             began = perf_counter()
             try:
                 initial = g1_closed_loop_state(nominal_state(self.cfg), self.gait_period)
-                reference = np.broadcast_to(self.reference_state, (self.N, 6)).copy()
+                reference = self._tracked_reference(
+                    self.dt * np.arange(1, self.N + 1)
+                )
                 _, result = self.mpc.solve(initial, reference, preceding_command=np.zeros(3))
                 if not result.success:
                     raise RuntimeError(f"MPC initialization failed: {result.message}")
@@ -220,9 +278,13 @@ class CustomCommand(CommandSource):
         if not self.quiet:
             print(f"Using {KCF_ROOT / 'mpc.py'} (L-BFGS-B, {self.backend_label}); "
                   f"ftol={self.mpc.function_tolerance:g} gtol={self.mpc.gradient_tolerance:g}; "
+                  f"Q_diag={self.mpc.state_weights.detach().cpu().tolist()} "
+                  f"Qf_diag={self.mpc.terminal_state_weights.detach().cpu().tolist()}; "
                   f"R={self.mpc.input_weight:g} "
                   f"S_diag={self.mpc.command_change_weights.detach().cpu().tolist()}; "
                   f"pose_prediction={self.mpc.pose_prediction_mode}; "
+                  f"prediction_model={self.mpc.prediction_model}; "
+                  f"reference_mode={self.reference_mode}; "
                   f"cpu_affinity={self.cpu_affinity}; "
                   f"execution={'synchronous' if self.synchronous_feedback else 'committed_handover'}; "
                   f"plan_max_age={self.live_plan_max_age:g}s; "
@@ -263,15 +325,16 @@ class CustomCommand(CommandSource):
             self._runtime_gc.close()
 
     def reference(self, t):
-        """Reference pose and twist at scalar/array controller time t; hold zero for now.
+        """Reference pose and world twist at scalar/array controller time ``t``.
 
         Returns (q_ref, v_ref), each (..., 3): world pose [px, py, theta]
-        and world twist [vx, vy, wz]. Values are loaded from the MPC config.
-        To track the baseline's curve later, return self.lissajous_reference(t).
+        and world twist [vx, vy, wz].
         """
+        if self.reference_mode == "lissajous":
+            return self.lissajous_reference(t)
         shape = np.shape(t) + (3,)
         return (np.broadcast_to(self.reference_state[:3], shape).copy(),
-                np.broadcast_to(self.reference_state[3:], shape).copy())
+                np.broadcast_to(self.reference_state[3:6], shape).copy())
 
     def lissajous_reference(self, t):
         """Baseline Lissajous pose/twist in the world frame, with tangent heading."""
@@ -281,8 +344,28 @@ class CustomCommand(CommandSource):
         vx, vy = a * w * np.cos(w * t), 2 * b * w * np.cos(2 * w * t)
         ax, ay = -a * w**2 * np.sin(w * t), -4 * b * w**2 * np.sin(2 * w * t)
         theta = np.arctan2(vy, vx)
+        # Follow one continuous tangent-heading branch. Without this correction,
+        # atan2 injects a spurious 2*pi MPC error on the left side of the curve.
+        phase = np.remainder(w * t, 2 * np.pi)
+        reverse_branch = ((phase >= 3 * np.pi / 4)
+                          & (phase <= 5 * np.pi / 4)
+                          & (theta > 0.0))
+        theta = np.where(reverse_branch, theta - 2 * np.pi, theta)
         wz = (vx * ay - vy * ax) / (vx**2 + vy**2)
         return np.stack([px, py, theta], axis=-1), np.stack([vx, vy, wz], axis=-1)
+
+    def _tracked_reference(self, times):
+        """Build MPC [world pose, body twist, gravity] references."""
+        q_ref, v_ref = self.reference(times)
+        cos_yaw, sin_yaw = np.cos(q_ref[..., 2]), np.sin(q_ref[..., 2])
+        v_ref_body = np.stack(
+            [cos_yaw * v_ref[..., 0] + sin_yaw * v_ref[..., 1],
+             -sin_yaw * v_ref[..., 0] + cos_yaw * v_ref[..., 1],
+             v_ref[..., 2]],
+            axis=-1,
+        )
+        gravity_ref = np.broadcast_to(self.reference_state[6:9], q_ref.shape)
+        return np.concatenate([q_ref, v_ref_body, gravity_ref], axis=-1)
 
     def reset(self):
         ready = getattr(self, '_ready_outcome', None)
@@ -292,7 +375,7 @@ class CustomCommand(CommandSource):
                 self._trace.handover(ready.trace_row, accepted=False, command=np.zeros(3),
                                      index=-1, age=np.nan, reason='reset_discard')
         self.theta_prev = None
-        self.ref = self.reference_state[:2].copy()
+        self.ref = np.asarray(self.reference(0.0)[0][:2]).copy()
         self.last_state_time = None
         self.last_observation = None
         self.previous_command = np.zeros(3, dtype=np.float32)
@@ -319,12 +402,9 @@ class CustomCommand(CommandSource):
     def _request(self, state, observation, now, *, plan_start_time=None, prefix_controls=None):
         # The same model timestep, reference conversion and optimization problem.
         t = (state.t if plan_start_time is None else plan_start_time) - self.t_start
-        q_ref, v_ref = self.reference(t + self.dt * np.arange(1, self.N + 1))
-        cos_yaw, sin_yaw = np.cos(q_ref[:, 2]), np.sin(q_ref[:, 2])
-        v_ref_body = np.stack([cos_yaw * v_ref[:, 0] + sin_yaw * v_ref[:, 1],
-                              -sin_yaw * v_ref[:, 0] + cos_yaw * v_ref[:, 1],
-                              v_ref[:, 2]], axis=-1)
-        reference = np.concatenate([q_ref, v_ref_body], axis=-1)
+        reference = self._tracked_reference(
+            t + self.dt * np.arange(1, self.N + 1)
+        )
         self._request_counter += 1
         observation, reference = observation.copy(), reference.copy()
         observation.flags.writeable = reference.flags.writeable = False
@@ -632,7 +712,12 @@ class CustomCommand(CommandSource):
 def main():
     args = parse_args()
     cfg = G1Config()
-    source = CustomCommand(cfg.cmd_scale, integrated_pose=args.integrated_pose)
+    source = CustomCommand(
+        cfg.cmd_scale,
+        integrated_pose=args.integrated_pose,
+        reference_mode="lissajous" if args.lissajous else None,
+        prediction_model="single_integrator" if args.single_integrator else None,
+    )
     try:
         run(source, cfg)
     finally:
