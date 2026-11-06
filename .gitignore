@@ -3,4 +3,6 @@
 **/.claude/
 **/MUJOCO_LOG.TXT
 /data/data/
+/data/pilots
 KCF_MPC/
+/tests

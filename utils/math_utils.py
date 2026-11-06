@@ -4,8 +4,12 @@
 #
 ##
 
+from typing import TYPE_CHECKING
+
 import numpy as np
-import torch
+
+if TYPE_CHECKING:
+    import torch
 
 
 def gravity_from_quat(quat: np.ndarray) -> np.ndarray:
@@ -17,10 +21,12 @@ def gravity_from_quat(quat: np.ndarray) -> np.ndarray:
     return np.array([gx, gy, gz], dtype=np.float32)
 
 
-def get_gravity_orientation_batch(quat: torch.Tensor) -> torch.Tensor:
+def get_gravity_orientation_batch(quat: "torch.Tensor") -> "torch.Tensor":
     """Projected gravity in body frame from base quaternion (w,x,y,z).
     Batched torch version of `gravity_from_quat`. Input (B,4), output (B,3).
     """
+    import torch
+
     qw, qx, qy, qz = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
     gx = 2.0 * (-qz * qx + qw * qy)
     gy = -2.0 * (qz * qy + qw * qx)
@@ -90,21 +96,18 @@ def q_to_rom(q: np.ndarray) -> np.ndarray:
 def v_to_rom(q: np.ndarray, v: np.ndarray) -> np.ndarray:
     """Reduce full qvel to a reduced-order twist [vx, vy, omega] in the body frame.
 
-    MuJoCo's free-joint qvel stores world-frame linear and angular velocity;
-    this rotates both into the base body frame using the base quaternion
-    and returns the (x, y) components of the linear part and the z component
-    of the angular part — matching what a body-frame velocity command (vx, vy, wz)
-    is expected to drive.
+    MuJoCo's free-joint qvel stores world-frame linear velocity and body-frame
+    angular velocity. Rotate only the linear part; angular velocity must not
+    be rotated a second time.
 
     Args:
         q: (..., nq) full qpos; q[..., 3:7] is the base quaternion.
-        v: (..., nv) full qvel; v[..., 0:3] world-frame linear, v[..., 3:6] world-frame angular.
+        v: (..., nv) full qvel; v[..., 0:3] world linear, v[..., 3:6] body angular.
     Returns:
         v_rom: (..., 3) of [vx_body, vy_body, omega_z_body].
     """
     quat = q[..., 3:7]
     v_lin_body = world_to_body(quat, v[..., 0:3])   # (..., 3)
-    v_ang_body = world_to_body(quat, v[..., 3:6])   # (..., 3)
     return np.stack([v_lin_body[..., 0],
                      v_lin_body[..., 1],
-                     v_ang_body[..., 2]], axis=-1)
+                     v[..., 5]], axis=-1)

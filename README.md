@@ -69,7 +69,7 @@ Terminal 2 (pick one):
 python sim/single/control_kb.py        # keyboard
 python sim/single/control_joy.py       # joystick
 python sim/single/control_custom.py    # your own logic
-python sim/single/control_custom.py --integrated-pose --lissajous  # KCF-MPC curve tracking
+python sim/single/control_custom.py --relative-frame --lissajous  # full-state KCF prediction
 python sim/single/control_custom.py --single-integrator --lissajous  # ideal-model comparison
 ```
 
@@ -79,14 +79,30 @@ python sim/single/control_custom.py --single-integrator --lissajous  # ideal-mod
   It turns red when it doesn't, so click it.
 - `control_joy.py`: Xbox controller. Left stick is `vx`, `vy`, and the right stick is `wz`.
 - `control_custom.py`: KCF-MPC control. It holds the fixed target by default; add `--lissajous` to track
-  the configured Lissajous pose-and-velocity reference, and add `--integrated-pose` to use the
-  velocity-integrated KCF pose estimate. Use `--single-integrator` instead of `--integrated-pose`
-  to run the same MPC problem with an ideal body-twist kinematic predictor.
+  the configured Lissajous pose-and-velocity reference. KCF predicts the complete state, including
+  pose, directly. Use `--relative-frame` for fixed local-frame canonicalization, or
+  `--single-integrator` for the separate ideal body-twist kinematic baseline.
 
 `state` holds sim time `t`, the robot's full `q` and `v`, and `prev_action`, the 23-D policy action from
 the previous 50 Hz policy tick (the one in the policy's next observation). In `v`, the base's linear
-velocity is in the world frame and its angular velocity is in the body frame. `control_custom.py` also
-builds the 84-D closed-loop state of the full-order KCF model each tick (`x_kcf` in `get`).
+velocity is in the world frame and its angular velocity is in the body frame.
+
+The KCF controller is separated into these modules:
+
+- `sim/single/control_custom.py`: command-source entry point and existing CLI flags.
+- `utils/kcf_controller.py`: MPC startup, feedback, execution, buffering, and trace lifecycle.
+- `utils/kcf_reference.py`: fixed/Lissajous paths and tracked reference construction.
+- `utils/g1_kcf_state.py`: NumPy-only encoder for the existing 84-D state, reusable without loading a controller.
+- `utils/g1_kcf_state_frame.py`: KCF-schema adapter using the shared geometry in `utils/relative_frame.py`.
+
+Trials pass saved settings through `CustomCommand(..., settings=plan["mpc"])`; overrides copy
+these settings rather than modifying the plan. The simulation loop, checkpoint, state schema,
+and relative-frame mathematics are unchanged.
+
+The former velocity-integrated KCF pose override has been removed in preparation for retraining.
+The old checkpoint is not thereby improved: its direct learned pose predictions previously caused
+falls, and the earlier integrated-pose closed-loop results do not validate this prediction path.
+Validate a newly trained full-state model before interpreting new KCF tracking trials.
 
 #### Saving a run
 Pass `--log <name>` to `simulation.py`. When the sim exits, it writes `data/data/<name>/g1_23dof_data.npz`
@@ -113,12 +129,49 @@ reduced-order state for each rollout into `./data/data/`. Requires a CUDA GPU.
 python sim/parallel/parallel_sim.py               # logged every physics step (500 Hz)
 python sim/parallel/parallel_sim.py --log_hz 100  # logged at 100 Hz
 ```
-Edit the constants in the `__main__` block of [`sim/parallel/parallel_sim.py`](sim/parallel/parallel_sim.py)
-(`batch_size`, `sim_dt_des`, `duration`, `N_datasets`, `cmd_zoh_steps`) to control the
-rollout size and command randomization. Each iteration produces two files:
-- `g1_23dof_data_XX.npz` — full order: `q_log`, `v_log`, `cmd_log`.
-- `g1_rom_data_XX.npz`   — reduced order: `q_rom_log` `[px, py, theta]`,
+The default remains the original uniform ZOH sampler, including its seed and command
+hold behavior. Use `--batch-size`, `--duration`, `--datasets`, `--seed`, and
+`--cmd-zoh-steps` to change collection size without editing the script. Physics stays
+at 0.002 s and the existing policy/PD controller are unchanged.
+
+Expanded collection is opt-in and also saves under `data/data/` by default:
+```bash
+python -u sim/parallel/parallel_sim.py --command-profile mixed \
+  --batch-size 100 --duration 6 --datasets 1 --cmd-zoh-steps 50 \
+  --command-scale 0.5 --seed 2
+```
+The default mix is 30% `constant_zoh` (one command for the entire trajectory),
+25% `multi_step_zoh`, 20% `smooth`, 15% `multisine`, and 10% `reversals`.
+`--profile-weights` accepts five proportions in that order; each profile can also
+be selected individually. Forward/backward, lateral, turning, combined, and
+zero-command families are distributed within each profile. Labels describe the
+intended excitation, not guaranteed achieved motion. `--command-scale` narrows
+the existing policy command box; it cannot expand it.
+
+Each iteration produces full-order and ROM NPZ files with the original keys.
+Profile and collection settings distinguish new files without modifying or
+overwriting existing ZOH recordings:
+
+- `g1_23dof_data_mixed_B100_T3001_zoh50_seed2_01.npz` — full order: `q_log`, `v_log`, `cmd_log`.
+- `g1_rom_data_mixed_B100_T3001_zoh50_seed2_01.npz` — reduced order: `q_rom_log` `[px, py, theta]`,
   `v_rom_log` `[vx, vy, wz]` (body frame), `cmd_log`.
+
+Full-order names match `data_config.py`'s `g1_23dof_data_*.npz` pattern;
+ROM files are excluded automatically. `--output-dir` remains available for an
+isolated pilot; process that directory using `data.py --input-dir <directory>`.
+The previously generated pilot under `data/pilots/step1_mixed_seed2/` is unchanged
+and retains its original filenames (requiring `--pattern 'g1_23dof*_data_*.npz'`).
+
+Full-order logs additionally contain `prev_action_log`, `gait_phase_log`, actual
+`time_log`, and left/right `foot_force_log` / `foot_contact_log`. Policy-clock
+logs (`policy_time_log`, `policy_cmd_log`, `policy_prev_action_log`,
+`policy_action_log`, `policy_gait_phase_log`) record the exact inputs/outputs at
+each query, even when state logging is decimated. `cmd_log` keeps its original
+incoming-held-command convention; `policy_cmd_log` is the outgoing command.
+Touch forces correspond to the logged pre-integration state, not the following
+state. Profile/family labels, settings, file hashes, versions, and pre-rollout RNG
+states accompany the recordings. State remains in MuJoCo world/body conventions;
+no relative-frame transformation or KCF/MPC change occurs here.
 
 ### Visualize datasets
 Both scripts take an optional run name. With one, they plot the run that `simulation.py --log <name>`

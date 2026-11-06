@@ -10,6 +10,9 @@ import os
 import sys
 import time
 import math
+import hashlib
+import json
+from pathlib import Path
 import numpy as np
 from dataclasses import dataclass
 
@@ -28,6 +31,76 @@ sys.path.insert(0, ROOT_DIR)
 from policy.actor import load_policy
 from policy.config import G1Config
 from utils.math_utils import get_gravity_orientation_batch, q_to_rom, v_to_rom
+
+
+COMMAND_PROFILES = ("constant_zoh", "multi_step_zoh", "smooth", "multisine", "reversals")
+PROFILE_WEIGHTS = (0.30, 0.25, 0.20, 0.15, 0.10)
+
+
+def dataset_paths(save_dir, profile, batch_size, samples, zoh_steps, seed, number):
+    """Keep full-order names discoverable by KCF_MPC/data_config.py."""
+    suffix = f"data_{profile}_B{batch_size}_T{samples}_zoh{zoh_steps}_seed{seed}_{number:02d}.npz"
+    return tuple(Path(save_dir) / f"{name}_{suffix}" for name in ("g1_23dof", "g1_rom"))
+
+
+def make_command_schedule(batch_size, queries, hold_steps, control_dt, lower, upper,
+                          rng, profile="mixed", weights=PROFILE_WEIGHTS):
+    """Bounded body commands on the policy clock; independent of the legacy RNG."""
+    weights = np.asarray(weights, dtype=float)
+    if (weights.shape != (5,) or not np.isfinite(weights).all()
+            or np.any(weights < 0) or not np.isclose(weights.sum(), 1.)):
+        raise ValueError("five nonnegative profile weights must sum to one")
+    if profile not in (*COMMAND_PROFILES, "mixed"):
+        raise ValueError(f"unknown command profile: {profile}")
+    lower, upper = np.asarray(lower), np.asarray(upper)
+    if (lower.shape != (3,) or upper.shape != (3,) or not np.isfinite([lower, upper]).all()
+            or np.any(lower > 0) or np.any(upper < 0)):
+        raise ValueError("expanded command bounds must contain zero in all three axes")
+    # Largest-remainder allocation preserves the requested proportions in small batches.
+    counts = np.floor(batch_size * weights).astype(int)
+    counts[np.argsort(-(batch_size * weights - counts), kind="stable")[:batch_size-counts.sum()]] += 1
+    labels = np.repeat(COMMAND_PROFILES, counts) if profile == "mixed" else np.full(batch_size, profile)
+    rng.shuffle(labels)
+    names = np.array(["forward", "backward", "left", "right", "turn_left", "turn_right", "combined", "standing"])
+    directions = np.array([[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0],
+                           [0, 0, 1], [0, 0, -1], [1, 1, .5], [0, 0, 0]])
+    behavior = np.empty(batch_size, dtype=int)
+    for label in np.unique(labels):
+        indices = np.flatnonzero(labels == label)
+        modes = np.arange(len(indices)) % len(names)
+        rng.shuffle(modes)
+        behavior[indices] = modes
+    direction = directions[behavior]
+    # Sample multiple speeds inside the configured box, never beyond policy limits.
+    target = direction * rng.uniform(.25, 1., (batch_size, 1))
+    target = np.where(target >= 0, target * upper, target * -lower)
+    segment = np.arange(queries) // hold_steps
+    levels = rng.uniform(.25, 1., (batch_size, segment[-1] + 2))
+    levels[:, 1::3] = 0.  # Explicit stopping intervals, not just small random commands.
+    command = np.empty((batch_size, queries, 3), dtype=np.float32)
+    clock = np.arange(queries) * control_dt
+    for index, label in enumerate(labels):
+        if label == "constant_zoh":
+            values = np.broadcast_to(target[index], (queries, 3))
+        elif label in ("multi_step_zoh", "smooth"):
+            gain = levels[index, segment]
+            if label == "smooth":
+                alpha = (np.arange(queries) % hold_steps) / hold_steps
+                alpha = alpha**2 * (3. - 2. * alpha)
+                previous = np.where(segment > 0, levels[index, np.maximum(segment-1, 0)], 0.)
+                gain = previous + alpha * (gain - previous)
+            values = gain[:, None] * target[index]
+        elif label == "multisine":
+            frequency = rng.uniform(.15, .6, (2, 3))
+            phase = rng.uniform(-np.pi, np.pi, (2, 3))
+            wave = np.sin(2*np.pi*clock[:, None, None]*frequency + phase)
+            envelope = np.minimum(clock / .5, np.maximum(0., clock[-1] - clock) / .5).clip(0., 1.)
+            values = target[index] * (wave[:, 0] * .65 + wave[:, 1] * .35) * envelope[:, None]
+        else:
+            gain = np.array([1., -1., 0.])[segment % 3]
+            values = gain[:, None] * target[index]
+        command[index] = np.clip(values, lower, upper)
+    return command, labels, names[behavior]
 
 
 ############################################################################
@@ -61,6 +134,8 @@ class ParallelSimConfig:
     cmd_zoh_steps: int = None                  # control queries per ZOH window (defaults to new command at every policy query)
     cmd_lb: np.ndarray = None                  # cmd sample lower bound, shape (3,); clipped to [-cmd_scale, +cmd_scale]; default = -cmd_scale
     cmd_ub: np.ndarray = None                  # cmd sample upper bound, shape (3,); clipped to [-cmd_scale, +cmd_scale]; default = +cmd_scale
+    command_profile: str = "zoh"               # original uniform ZOH, or expanded profiles
+    profile_weights: tuple = PROFILE_WEIGHTS
 
 
 ############################################################################
@@ -78,6 +153,11 @@ class ParallelSim:
         # config parameters
         self.batch_size = config.batch_size
         self.log_dtype = config.log_dtype
+        self.command_profile = config.command_profile
+        self.profile_weights = config.profile_weights
+        self.profile_rng = np.random.default_rng(config.seed)
+        if self.batch_size < 1 or self.command_profile not in ("zoh", "mixed", *COMMAND_PROFILES):
+            raise ValueError("positive batch_size and a recognized command_profile are required")
 
         # random seed
         seed = config.seed
@@ -123,6 +203,9 @@ class ParallelSim:
                 raise ValueError(f"cmd_ub must have shape (3,), got {tuple(cmd_ub_t.shape)}")
         self.cmd_lb = torch.clamp(cmd_lb_t, -self.cmd_scale, +self.cmd_scale)
         self.cmd_ub = torch.clamp(cmd_ub_t, -self.cmd_scale, +self.cmd_scale)
+        if not bool(torch.isfinite(self.cmd_lb).all() & torch.isfinite(self.cmd_ub).all()
+                    & (self.cmd_lb <= self.cmd_ub).all()):
+            raise ValueError("command bounds must be finite and ordered")
 
         # writable (B, 3) cmd buffer — repeated rather than expanded so we can resample it
         self.cmd = torch.tensor(
@@ -130,6 +213,8 @@ class ParallelSim:
         ).unsqueeze(0).repeat(self.batch_size, 1).contiguous()  # (B, 3)
         # None defaults to 1: resample cmd at every control query
         self.cmd_zoh_steps = 1 if config.cmd_zoh_steps is None else int(config.cmd_zoh_steps)
+        if self.cmd_zoh_steps < 1:
+            raise ValueError("cmd_zoh_steps must be positive")
 
         # timing
         self.control_dt = self.robot_cfg.control_dt
@@ -247,7 +332,17 @@ class ParallelSim:
         qpos_joints = self.t_qpos[:, 7:7 + self.nu]   # (B, 23)
         qvel_joints = self.t_qvel[:, 6:6 + self.nu]   # (B, 23)
 
-        # gait phase clock
+        gait_phase = self.gait_phase(sim_time)
+
+        # joint position error
+        qj_err = qpos_joints - self.default_joint_pos  # (B, 23)
+
+        # [omega(3), gravity(3), cmd(3), phase(2), qj_err(23), dqj(23), prev_action(23)]
+        return torch.cat([omega_body, gravity, self.cmd, gait_phase,
+                          qj_err, qvel_joints, prev_action], dim=-1)
+
+    def gait_phase(self, sim_time):
+        """The unchanged policy clock, also recorded alongside the full state."""
         phase = (sim_time % self.gait_period) / self.gait_period  # (B,)
         two_pi = 2.0 * math.pi
         gait_sin = torch.sin(two_pi * phase)   # (B,)
@@ -259,22 +354,7 @@ class ParallelSim:
         standing = (cmd_norm < self.robot_cfg.stand_cmd_threshold)
         gait_phase[standing] = 0.0
 
-        # joint position error
-        qj_err = qpos_joints - self.default_joint_pos  # (B, 23)
-
-        # assemble observation:
-        # [omega(3), gravity(3), cmd(3), phase(2), qj_err(23), dqj(23), prev_action(23)]
-        obs = torch.cat([
-            omega_body,                      # 0:3
-            gravity,                         # 3:6
-            self.cmd,                        # 6:9
-            gait_phase,                      # 9:11
-            qj_err,                          # 11:34
-            qvel_joints,                     # 34:57
-            prev_action,                     # 57:80
-        ], dim=-1)
-
-        return obs
+        return gait_phase
 
     # ------------------------------------------------------------------ #
     #  PD Control
@@ -357,7 +437,20 @@ class ParallelSim:
             cmd_log:      (B, T, 3) cmd active at each logged timestep
         """
         B = self.batch_size
+        if not isinstance(T, int) or T < 2:
+            raise ValueError("T must include at least two logged samples")
         S = (T - 1) * self.log_decimation  # number of sim steps to take (T includes initial state)
+        queries = (S + self.decimation - 1) // self.decimation
+        schedule = None
+        if self.command_profile != "zoh":
+            schedule, labels, behaviors = make_command_schedule(
+                B, queries, self.cmd_zoh_steps, self.control_dt,
+                self.cmd_lb.cpu().numpy(), self.cmd_ub.cpu().numpy(), self.profile_rng,
+                self.command_profile, self.profile_weights,
+            )
+            schedule = torch.as_tensor(schedule, device=self.device)
+        else:
+            labels, behaviors = np.full(B, "zoh"), np.full(B, "uniform_box")
 
         # reset data to default state
         mjwarp.reset_data(self.wp_model, self.wp_data)
@@ -374,9 +467,25 @@ class ParallelSim:
         q_log = torch.zeros(B, T, self.nq, dtype=self.log_dtype, device=self.device)
         v_log = torch.zeros(B, T, self.nv, dtype=self.log_dtype, device=self.device)
         cmd_log = torch.zeros(B, T, 3, dtype=self.log_dtype, device=self.device)
+        # Additive diagnostics; preserve the public (q_log, v_log, cmd_log) return.
+        self.rollout_logs = {
+            name: torch.empty(B, count, width, dtype=self.log_dtype, device=self.device)
+            for name, count, width in (
+                ("prev_action_log", T, self.nu), ("gait_phase_log", T, 2),
+                ("foot_force_log", T, 2), ("policy_cmd_log", queries, 3),
+                ("policy_prev_action_log", queries, self.nu),
+                ("policy_action_log", queries, self.nu), ("policy_gait_phase_log", queries, 2),
+            )
+        }
+        self.rollout_logs["time_log"] = torch.empty(B, T, dtype=torch.float64, device=self.device)
+        self.rollout_logs["policy_time_log"] = torch.empty(B, queries, dtype=torch.float64, device=self.device)
+        self.profile_labels, self.behavior_labels = labels, behaviors
 
         # sample initial cmd
-        self._sample_cmd()
+        if schedule is None:
+            self._sample_cmd()
+        else:
+            self.cmd[:] = schedule[:, 0]
 
         # log initial state
         q_log[:, 0, :] = self.t_qpos.to(self.log_dtype)
@@ -386,6 +495,7 @@ class ParallelSim:
         # initialize previous action
         prev_action = torch.zeros(B, self.nu, dtype=torch.float32, device=self.device)
         action = prev_action
+        self._log_memory(0, prev_action)
 
         # main rollout loop
         ctrl_query = 0
@@ -394,12 +504,19 @@ class ParallelSim:
                 # update policy every decimation steps
                 if step % self.decimation == 0:
                     # resample cmd on ZOH boundaries (skip query 0 — already sampled above)
-                    if ctrl_query > 0 and ctrl_query % self.cmd_zoh_steps == 0:
+                    if schedule is not None:
+                        self.cmd[:] = schedule[:, ctrl_query]
+                    elif ctrl_query > 0 and ctrl_query % self.cmd_zoh_steps == 0:
                         self._sample_cmd()
 
                     sim_time = self.t_time  # (B,)
                     obs = self.build_observation(prev_action, sim_time)
+                    self.rollout_logs["policy_time_log"][:, ctrl_query] = sim_time
+                    self.rollout_logs["policy_cmd_log"][:, ctrl_query] = self.cmd
+                    self.rollout_logs["policy_prev_action_log"][:, ctrl_query] = prev_action
+                    self.rollout_logs["policy_gait_phase_log"][:, ctrl_query] = obs[:, 9:11]
                     action = self.policy(obs)  # (B, 23)
+                    self.rollout_logs["policy_action_log"][:, ctrl_query] = action
                     prev_action = action
                     ctrl_query += 1
 
@@ -407,6 +524,10 @@ class ParallelSim:
                 tau = self.compute_torque(action)
                 self.t_ctrl[:] = tau
                 mjwarp.step(self.wp_model, self.wp_data)
+                # step() evaluates sensors BEFORE integration. Associate touch
+                # forces with the pre-step snapshot, not the new qpos/time.
+                if step % self.log_decimation == 0:
+                    self.rollout_logs["foot_force_log"][:, step // self.log_decimation] = self.t_sensordata[:, 20:22]
 
                 # log state every log_decimation sim steps
                 if (step + 1) % self.log_decimation == 0:
@@ -414,8 +535,20 @@ class ParallelSim:
                     q_log[:, k, :] = self.t_qpos.to(self.log_dtype)
                     v_log[:, k, :] = self.t_qvel.to(self.log_dtype)
                     cmd_log[:, k, :] = self.cmd.to(self.log_dtype)
+                    self._log_memory(k, prev_action)
+
+            # Only the terminal diagnostic needs another forward pass. No
+            # subsequent physics/policy step sees its solver or sensor state.
+            self.t_ctrl[:] = self.compute_torque(action)
+            mjwarp.forward(self.wp_model, self.wp_data)
+            self.rollout_logs["foot_force_log"][:, -1] = self.t_sensordata[:, 20:22]
 
         return q_log, v_log, cmd_log
+
+    def _log_memory(self, index, previous_action):
+        self.rollout_logs["time_log"][:, index] = self.t_time
+        self.rollout_logs["prev_action_log"][:, index] = previous_action
+        self.rollout_logs["gait_phase_log"][:, index] = self.gait_phase(self.t_time)
 
     def rollout_policy_input_x0(self, x0_batch: torch.Tensor, T: int):
         """Run a policy rollout from a stacked state vector x0 = [q, v].
@@ -443,7 +576,22 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate G1 rollout datasets on the GPU.")
     parser.add_argument("--log_hz", type=float, default=None, metavar="HZ",
                         help="logging rate; must divide the sim rate (default: every sim step)")
+    parser.add_argument("--batch-size", type=int, default=1024)
+    parser.add_argument("--duration", type=float, default=1., help="trajectory length in seconds")
+    parser.add_argument("--datasets", type=int, default=20)
+    parser.add_argument("--seed", type=int, default=2)
+    parser.add_argument("--cmd-zoh-steps", type=int, default=50, help="policy queries per command segment")
+    parser.add_argument("--command-profile", choices=("zoh", "mixed", *COMMAND_PROFILES), default="zoh")
+    parser.add_argument("--profile-weights", type=float, nargs=5, default=PROFILE_WEIGHTS,
+                        metavar="W", help="constant, multi-step, smooth, multisine, reversal proportions")
+    parser.add_argument("--command-scale", type=float, default=1., help="fraction of existing policy command limits (0, 1]")
+    parser.add_argument("--output-dir", type=Path, help="override the default data/data destination")
     args = parser.parse_args()
+    if args.batch_size < 1 or args.datasets < 1 or not np.isfinite(args.duration) or args.duration <= 0:
+        parser.error("batch size, datasets, and duration must be positive")
+    if not 0 < args.command_scale <= 1 or args.cmd_zoh_steps < 1:
+        parser.error("command scale must be in (0, 1] and ZOH steps must be positive")
+    legacy_dir = Path(ROOT_DIR) / "data" / "data"
 
     # print the device being used
     print(f"CUDA device: {torch.cuda.get_device_name(0)}")
@@ -452,24 +600,20 @@ if __name__ == "__main__":
     xml_path = os.path.join(ROOT_DIR, "models", "g1_23dof.xml")
     policy_path = os.path.join(ROOT_DIR, "policy", "g1_23dof_vel.pt")
 
-    # environment name (used for file naming)
-    env_name = "g1_23dof"
-    rom_env_name = "g1_rom"
-
     # rollout parameters
-    batch_size = 1024
+    batch_size = args.batch_size
     sim_dt_des = 0.002  # dt for simulation (too coarse causes sim instability) - DO NOT CHANGE!!
-    duration = 1.0      # [s] rollout length; 501 samples at the default 500 Hz logging rate
+    duration = args.duration  # old 1-second default retained; use longer rollouts for training windows
 
     # number of datasets to generate
-    N_datasets = 20
+    N_datasets = args.datasets
 
     # cmd randomization: resample per-env cmd every N policy queries (None = resample every control query)
     # at control_dt=0.02 s, 125 queries = 2.5 s of hold per ZOH window
-    cmd_zoh_steps = 50
+    cmd_zoh_steps = args.cmd_zoh_steps
 
     # random /fixed seed
-    seed = 2
+    seed = args.seed
     #seed = int(time.time())
 
     # create the config for parallel sim
@@ -481,11 +625,32 @@ if __name__ == "__main__":
         sim_dt_des=sim_dt_des,
         cmd_zoh_steps=cmd_zoh_steps,
         log_hz=args.log_hz,
+        cmd_lb=-G1Config().cmd_scale * args.command_scale,
+        cmd_ub=G1Config().cmd_scale * args.command_scale,
+        command_profile=args.command_profile,
+        profile_weights=tuple(args.profile_weights),
     )
 
     # create the rollout instance; T counts logged samples, incl. the initial state
     r = ParallelSim(config)
     T = int(round(duration / r.log_dt)) + 1
+    if T < 2 or not math.isclose((T-1)*r.log_dt, duration, abs_tol=1e-9):
+        parser.error("duration must be a positive multiple of the logging period")
+    metadata = dict(
+        schema_version=2, command_profile=args.command_profile,
+        profile_weights=list(args.profile_weights),
+        cmd_lb=r.cmd_lb.cpu().tolist(), cmd_ub=r.cmd_ub.cpu().tolist(),
+        robot_config={key: value.tolist() if isinstance(value, np.ndarray) else value
+                      for key, value in vars(r.robot_cfg).items()},
+        initial_bounds={name: getattr(r, name).cpu().tolist() for name in ("q_lb", "q_ub", "v_lb", "v_ub")},
+        sha256={name: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+                for name, path in (("model", xml_path), ("policy", policy_path), ("generator", __file__))},
+        versions=dict(python=sys.version, numpy=np.__version__, torch=torch.__version__,
+                      mujoco=mujoco.__version__, mujoco_warp=mjwarp.__version__, warp=wp.__version__),
+        device=torch.cuda.get_device_name(0), coordinates="world qpos; world linear/body angular qvel; body commands",
+        alignment="state/time/previous-action sampled before the next query; cmd_log is the incoming held command; policy_cmd_log is outgoing at policy_time_log",
+        contact="left/right foot touch forces evaluated at the logged state (pre-integration); contact flag is force > 0",
+    )
 
     # function to rollout and save full-order + ROM datasets,
     # returns time it took to complete the rollout (excluding saving time)
@@ -494,6 +659,8 @@ if __name__ == "__main__":
         print(f"\nGenerating {label}...")
 
         t0 = time.time()
+        rng_state = r.rng.get_state().cpu().numpy()
+        profile_rng_state = json.dumps(r.profile_rng.bit_generator.state)
         q_log, v_log, cmd_log = r.rollout_policy_input(T)
         torch.cuda.synchronize()
         rollout_time = time.time() - t0
@@ -502,6 +669,13 @@ if __name__ == "__main__":
         q_log_np = q_log.cpu().numpy()
         v_log_np = v_log.cpu().numpy()
         cmd_log_np = cmd_log.cpu().numpy()
+        extra_logs = {name: values.cpu().numpy() for name, values in r.rollout_logs.items()}
+        extra_logs["foot_contact_log"] = extra_logs["foot_force_log"] > 0.
+        provenance = dict(
+            command_profile_labels=r.profile_labels, locomotion_labels=r.behavior_labels,
+            generation_metadata=json.dumps(metadata), dataset_index=i+1,
+            torch_rng_state_before=rng_state, profile_rng_state_before=profile_rng_state,
+        )
 
         # derive ROM state: q_rom = [px, py, theta] (world frame),
         # v_rom = [vx, vy, omega_z] (body frame, matches body-frame cmd input)
@@ -528,6 +702,7 @@ if __name__ == "__main__":
             q_log=q_log_np,
             v_log=v_log_np,
             cmd_log=cmd_log_np,
+            **extra_logs, **provenance,
         )
         print(f"  Saved full-order to: {save_path}")
 
@@ -545,36 +720,27 @@ if __name__ == "__main__":
             q_rom_log=q_rom_log_np,
             v_rom_log=v_rom_log_np,
             cmd_log=cmd_log_np,
+            **provenance,
         )
         print(f"  Saved ROM to:        {rom_save_path}")
 
         return rollout_time
 
-    # generate numbered datasets with generation settings in the filename:
-        #   full-order: <env_name>_B<batch_size>_T<T>_zoh<cmd_zoh_steps>_seed<seed>_data_XX.npz
-        #   ROM:        <rom_env_name>_B<batch_size>_T<T>_zoh<cmd_zoh_steps>_seed<seed>_data_XX.npz
+    # Profile-specific files stay separate, but match the training config's
+    # g1_23dof_data_*.npz glob in data/data by default.
 
     tot_time = 0.0
-    save_dir = os.path.join(ROOT_DIR, "data", "data")
+    save_dir = str(args.output_dir or legacy_dir)
     os.makedirs(save_dir, exist_ok=True)
+    # Never overwrite an existing full-order OR ROM recording, including ZOH.
+    for number in range(1, N_datasets+1):
+        for target in dataset_paths(save_dir, args.command_profile, batch_size, T, cmd_zoh_steps, seed, number):
+            if target.exists() or target.is_symlink():
+                raise FileExistsError(f"refusing to overwrite existing recording: {target}")
 
     for i in range(N_datasets):
-        save_path = (
-            f"{save_dir}/{env_name}"
-            f"_B{batch_size}"
-            f"_T{T}"
-            f"_zoh{cmd_zoh_steps}"
-            f"_seed{seed}"
-            f"_data_{i+1:02d}.npz"
-        )
-
-        rom_save_path = (
-            f"{save_dir}/{rom_env_name}"
-            f"_B{batch_size}"
-            f"_T{T}"
-            f"_zoh{cmd_zoh_steps}"
-            f"_seed{seed}"
-            f"_data_{i+1:02d}.npz"
+        save_path, rom_save_path = dataset_paths(
+            save_dir, args.command_profile, batch_size, T, cmd_zoh_steps, seed, i+1,
         )
 
         tot_time += rollout_and_save_dataset(
