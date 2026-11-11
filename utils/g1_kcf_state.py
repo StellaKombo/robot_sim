@@ -1,10 +1,7 @@
-"""Encode live MuJoCo state using the existing 84-D G1 KCF schema.
-"""
+"""Encode live MuJoCo feedback in the trained 85-state G1 KCF schema."""
 
 from typing import Protocol
-
 import numpy as np
-
 from utils.math_utils import gravity_from_quat, q_to_rom, v_to_rom, world_to_body
 
 
@@ -17,20 +14,27 @@ class G1State(Protocol):
     prev_action: np.ndarray
 
 
-def g1_closed_loop_state(state: G1State, gait_period: float,
-                         theta_prev: float | None = None) -> np.ndarray:
-    """84-D Markov state of the full-order KCF model, as in the training data.
+def g1_closed_loop_state(state: G1State, gait_period: float) -> np.ndarray:
+    """Build the native 85 channels, with position/heading in world coordinates.
 
-    [px, py, theta] (3), [vx, vy, wz] (3), pz (1), gravity (3), joint q (23),
+    [px, py, sin(theta), cos(theta)] (4), [vx, vy, wz] (3), pz (1),
+    gravity (3), joint q (23),
     [vz, wx, wy] (3), joint v (23), gait [sin, cos] (2), previous action (23).
-    Pass the previous tick's theta to unwrap yaw across consecutive states.
+    MPC anchors the complete 85-state vector to one fixed rollout frame.
     """
     q = state.q.astype(np.float32)
     v = state.v.astype(np.float32)
     quat = q[3:7]
     planar_pose = q_to_rom(q).astype(np.float32, copy=False)
-    if theta_prev is not None:
-        planar_pose[2] = np.unwrap(np.array([theta_prev, planar_pose[2]], dtype=np.float32))[1]
+    pose = np.array(
+        [
+            planar_pose[0],
+            planar_pose[1],
+            np.sin(planar_pose[2]),
+            np.cos(planar_pose[2]),
+        ],
+        dtype=np.float32,
+    )
     planar_velocity = v_to_rom(q, v).astype(np.float32, copy=False)
     planar_velocity[2] = v[5]
     gravity = gravity_from_quat(quat)
@@ -40,6 +44,29 @@ def g1_closed_loop_state(state: G1State, gait_period: float,
         [linear_body[2], angular_body[0], angular_body[1]], dtype=np.float32
     )
     phase = np.remainder(state.t, gait_period) / gait_period
-    gait = np.array([np.sin(2 * np.pi * phase), np.cos(2 * np.pi * phase)], dtype=np.float32)
-    return np.concatenate([planar_pose, planar_velocity, q[2:3], gravity, q[7:],
-                           remaining_base_velocity, v[6:], gait, state.prev_action.astype(np.float32)])
+    gait = np.array(
+        [np.sin(2 * np.pi * phase), np.cos(2 * np.pi * phase)], dtype=np.float32
+    )
+    return np.concatenate(
+        [
+            pose,
+            planar_velocity,
+            q[2:3],
+            gravity,
+            q[7:],
+            remaining_base_velocity,
+            v[6:],
+            gait,
+            state.prev_action.astype(np.float32),
+        ]
+    )
+
+
+def g1_world_heading(state: G1State, previous: float | None = None) -> float:
+    """Continuous measured heading metadata for the existing MPC yaw cost."""
+    heading = float(q_to_rom(state.q.astype(np.float32))[2])
+    if previous is not None:
+        heading = previous + np.arctan2(
+            np.sin(heading - previous), np.cos(heading - previous)
+        )
+    return float(heading)
