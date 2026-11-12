@@ -18,8 +18,12 @@ update:
 	conda env update -n $(ENV) -f environment.yml --prune
 	conda env config vars set -n $(ENV) ROBOT_SIM_ROOT_DIR="$(CURDIR)"
 
-# Run after conda activation and installing requirements-dev.txt.
+# Maintainer-only: regression suites stay local, not in a shared checkout.
 test:
+	@if [ ! -d tests ] || [ ! -d KCF_MPC/tests ]; then \
+		echo "Regression tests are local-only; use make check and the MuJoCo smoke tools in a shared checkout."; \
+		exit 2; \
+	fi
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 JAX_PLATFORMS=cpu MPLBACKEND=Agg python -m pytest -q
 
 # Inspect the configured controller without starting physics or opening sockets.

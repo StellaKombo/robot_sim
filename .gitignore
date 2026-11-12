@@ -14,3 +14,5 @@
 .env.*
 !.env.example
 .venv/
+# Regression tests stay on this machine, not in the shared checkout.
+/tests/

@@ -26,14 +26,16 @@ Do not update the submodule to an arbitrary remote tip. No training data is need
 The default JAX backend needs a CUDA-12-compatible NVIDIA driver and GPU access.
 For an existing environment, use `make update` after dependency changes.
 
-Optional regression tests:
+Regression tests are kept locally by maintainers, not shipped in this checkout.
+If you have those local test folders, their optional dependencies and command are:
 
 ```bash
 python -m pip install -r requirements-dev.txt
 make test
 ```
 
-Tests use CPU JAX and non-interactive plots; GPU-only checks skip without CUDA.
+Local tests use CPU JAX and non-interactive plots; GPU-only checks skip without CUDA.
+The shared smoke/validation tools below do not need the regression-test folders.
 
 ## First run: KCF versus SI
 
@@ -139,7 +141,9 @@ deployment. Do not run multiple command sources together.
   controller lifecycle, references, native-85 encoding and fixed-frame adapter.
 - `KCF_MPC/config/mpc_config.py`: selected checkpoint and numerical settings.
 - `KCF_MPC/models/`, `KCF_MPC/mpc/`: learned-model inference and MPC library.
-- `KCF_MPC/scripts/`, `data/*.py`, `tests/`: simulation tests, diagnostics and regression checks.
+- `KCF_MPC/scripts/`, `data/*.py`: simulation runs, validation and diagnostics.
+
+Regression suites under both `tests/` folders stay local and are ignored by Git.
 
 Offline training, preprocessing, dataset collection, model-evaluation CLIs, old
 MPC paths and experimental fine-tuning tooling are outside this handover. Their
