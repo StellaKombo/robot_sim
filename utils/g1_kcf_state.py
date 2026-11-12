@@ -63,7 +63,7 @@ def g1_closed_loop_state(state: G1State, gait_period: float) -> np.ndarray:
 
 
 def g1_world_heading(state: G1State, previous: float | None = None) -> float:
-    """Continuous measured heading metadata for the existing MPC yaw cost."""
+    """Continuous measured heading for diagnostic metadata and frame anchoring."""
     heading = float(q_to_rom(state.q.astype(np.float32))[2])
     if previous is not None:
         heading = previous + np.arctan2(

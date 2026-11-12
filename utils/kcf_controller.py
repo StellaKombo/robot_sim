@@ -27,6 +27,7 @@ from config.mpc_config import get_default_mpc_config
 from KCF_MPC.mpc.mpc import create_mpc_controller
 from KCF_MPC.mpc.mpc_runtime import StartupGCFreeze
 from KCF_MPC.mpc.mpc_trace import MPCSolveTrace
+from KCF_MPC.mpc.tracking import TRACKING_LABELS
 from KCF_MPC.mpc.mpc_buffered import (
     AsyncConsole,
     BufferedPlan,
@@ -122,7 +123,7 @@ class KCFCommand(CommandSource):
             f"/{str(self.mpc.dtype).removeprefix('torch.')}/{self.mpc.solver}-lbfgsb"
         )
 
-        expected_tracked_indices = tuple(range(9))
+        expected_tracked_indices = tuple(range(len(TRACKING_LABELS)))
         observation_dim = getattr(
             self.mpc, "observation_dim", self.mpc.model.config.state_dim
         )
@@ -530,7 +531,13 @@ class KCFCommand(CommandSource):
             reason = "reset_discard"
             self.reset_discards += 1
         elif not result.success:
-            self._plan = None
+            # A lockstep solve owns the current physics tick, so its last
+            # successful horizon is still aligned with simulation time.  Keep
+            # that bounded plan available for the synchronous failure path;
+            # asynchronous execution continues to fail closed because its
+            # wall-time alignment can no longer be trusted here.
+            if not self.synchronous_feedback:
+                self._plan = None
             reason = "solver_failure"
             self.failure_count += 1
         elif rejection is not None:
@@ -672,12 +679,36 @@ class KCFCommand(CommandSource):
                 return self.previous_command.copy()
             outcome = self._worker.solve_inline(self._request(state, observation, now))
             self._consume(outcome, application_time, now, state)
-            command = (
-                outcome.controls[0].astype(np.float32, copy=True)
-                if outcome.result.success
-                else np.zeros(3, dtype=np.float32)
-            )
-            index, age, reason = 0, 0.0, "synchronous"
+            if outcome.result.success:
+                command = outcome.controls[0].astype(np.float32, copy=True)
+                index, age, reason = 0, 0.0, "synchronous"
+            else:
+                # Wall time is deliberately irrelevant in lockstep: physics
+                # has not advanced during the failed solve.  Advance through
+                # the previous successful horizon using simulation time only.
+                # BufferedPlan still enforces the horizon/max-age bound.
+                if self._plan is None:
+                    command, index, age = None, -1, np.nan
+                else:
+                    command, index, age, _ = self._plan.select(
+                        application_time,
+                        self._plan.request.query_wall_time,
+                        self.dt,
+                        self.live_plan_max_age,
+                    )
+                if command is None:
+                    self._plan = None
+                    command = np.zeros(3, dtype=np.float32)
+                    reason = "synchronous_failure_zero"
+                else:
+                    reason = "synchronous_failure_fallback"
+                    if self._console is not None:
+                        self._console.write(
+                            f"[MPC synchronous fallback] "
+                            f"failed_plan_id={outcome.request.plan_id} "
+                            f"fallback_plan_id={self._plan.request.plan_id} "
+                            f"plan_index={index} plan_age={1000*age:.1f}ms"
+                        )
         else:
             if (
                 self._last_application_time is not None

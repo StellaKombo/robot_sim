@@ -23,7 +23,7 @@ def _values(values, name, width):
 
 @dataclass(frozen=True)
 class G1KCFSinCosFrame:
-    """Transform native states; retain continuous heading for reference costs."""
+    """Transform native states; retain continuous heading for diagnostics."""
 
     frame: RelativeFrame
     yaw_origin_world: float | None = None

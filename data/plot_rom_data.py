@@ -24,9 +24,38 @@ sys.path.insert(0, ROOT_DIR)
 # USEFUL VARS AND FUNCTIONS
 ############################################################################
 
-# ROM state labels — q_rom = [px, py, theta] (world), v_rom = [vx, vy, wz] (body)
-Q_ROM_LABELS = ["px [m]", "py [m]", "theta [rad]"]
+# Saved ROM logs traditionally contain [px, py, theta]. Plot heading in the
+# model's sine/cosine representation without changing or reinterpreting logs.
+Q_ROM_LABELS = ["px [m]", "py [m]", "sin(theta)", "cos(theta)"]
 V_ROM_LABELS = ["vx [m/s]", "vy [m/s]", "wz [rad/s]"]
+
+
+def pose_sincos(q_rom):
+    """Return [..., px, py, sin(theta), cos(theta)] from 3- or 4-column ROM poses."""
+    q_rom = np.asarray(q_rom, dtype=float)
+    if q_rom.ndim == 0 or q_rom.shape[-1] not in (3, 4):
+        raise ValueError("ROM pose must end with [x,y,yaw] or [x,y,sin(yaw),cos(yaw)]")
+    if not np.isfinite(q_rom).all():
+        raise ValueError("ROM poses must be finite")
+    if q_rom.shape[-1] == 4:
+        if np.any(np.linalg.norm(q_rom[..., 2:4], axis=-1) < 1e-12):
+            raise ValueError("Heading sine/cosine pairs must be nonzero")
+        return q_rom.copy()
+    return np.concatenate((q_rom[..., :2], np.sin(q_rom[..., 2:3]),
+                           np.cos(q_rom[..., 2:3])), axis=-1)
+
+
+def triangle_vertices(pose, length=.25, width=.18):
+    """Triangle orientation from a sine/cosine pair, normalized only for drawing."""
+    px, py, sine, cosine = pose
+    norm = np.hypot(sine, cosine)
+    if norm < 1e-12:
+        raise ValueError("Cannot draw a zero heading pair")
+    sine, cosine = sine / norm, cosine / norm
+    rotation = np.array([[cosine, -sine], [sine, cosine]])
+    body = np.array([[length, 0.], [-length / 2, width / 2],
+                     [-length / 2, -width / 2]])
+    return body @ rotation.T + [px, py]
 
 
 def draw_traces(axes, t, X, labels, overlays=None):
@@ -43,12 +72,13 @@ def draw_traces(axes, t, X, labels, overlays=None):
 
 def playback_rom_trajectories(q_rom_sel, log_dt, idx, render_hz=50.0,
                               tri_length=0.25, tri_width=0.18, loop=True):
-    """Animate selected ROM poses [px, py, theta] in a 2D top-down view in its
+    """Animate selected ROM poses [px, py, theta] or [px, py, sin, cos] in its
     own figure. Each trajectory is drawn as a triangle pointing along its
     heading, with a trail of past positions. Paced to wall clock at render_hz.
 
     If loop=True the animation restarts forever; close the window to stop.
     """
+    q_rom_sel = pose_sincos(q_rom_sel)
     num, T, _ = q_rom_sel.shape
     render_dt = 1.0 / render_hz
     step_skip = max(1, int(round(render_dt / log_dt)))
@@ -99,7 +129,7 @@ def playback_rom_trajectories(q_rom_sel, log_dt, idx, render_hz=50.0,
         # reset trails at the start of each pass
         for trail in trails:
             trail.set_data([], [])
-        wall_start = time.time()
+        wall_start = time.perf_counter()
 
         for k in range(0, T, step_skip):
             if fig_num is None or not plt.fignum_exists(fig_num):
@@ -107,15 +137,12 @@ def playback_rom_trajectories(q_rom_sel, log_dt, idx, render_hz=50.0,
                 return
             # pace playback to real time
             target = wall_start + k * log_dt
-            slack = target - time.time()
+            slack = target - time.perf_counter()
             if slack > 0:
                 time.sleep(slack)
 
             for traj_i in range(num):
-                px, py, theta = q_rom_sel[traj_i, k]
-                cos_t, sin_t = np.cos(theta), np.sin(theta)
-                R = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
-                verts = triangle_body @ R.T + np.array([px, py])
+                verts = triangle_vertices(q_rom_sel[traj_i, k], tri_length, tri_width)
                 triangles[traj_i].set_xy(verts)
                 trails[traj_i].set_data(q_rom_sel[traj_i, :k + 1, 0],
                                         q_rom_sel[traj_i, :k + 1, 1])
@@ -174,8 +201,8 @@ def main():
     seed = int(time.time())
 
     # load the data
-    data = np.load(data_path)
-    q_rom = data["q_rom_log"]            # (B, T, 3) [px, py, theta]
+    data = np.load(data_path, allow_pickle=False)
+    q_rom = data["q_rom_log"]            # Legacy (B,T,3) yaw; native (B,T,4) sin/cos also accepted.
     v_rom = data["v_rom_log"]            # (B, T, 3) [vx, vy, wz]  (body frame)
     cmd = data["cmd_log"]                # (B, T, 3) [vx, vy, wz]  (body frame)
     sim_dt = float(data["sim_dt"])
@@ -206,11 +233,12 @@ def main():
         2: cmd_sel[:, :, 2],
     }
 
-    # Figure 2 — static traces: q_rom on the top row, v_rom on the bottom row
-    fig_static, axes = plt.subplots(2, 3, figsize=(12, 6), constrained_layout=True)
-    draw_traces(axes[0], t, q_rom_sel, Q_ROM_LABELS)
-    draw_traces(axes[1], t, v_rom_sel, V_ROM_LABELS, overlays=v_overlays)
-    fig_static.suptitle("ROM traces — q_rom (top), v_rom (bottom)", fontsize=11)
+    # Display the same heading features as the MPC, including for legacy logs.
+    fig_static, axes = plt.subplots(2, 4, figsize=(14, 6), constrained_layout=True)
+    draw_traces(axes[0], t, pose_sincos(q_rom_sel), Q_ROM_LABELS)
+    draw_traces(axes[1, :3], t, v_rom_sel, V_ROM_LABELS, overlays=v_overlays)
+    axes[1, 3].axis("off")
+    fig_static.suptitle("ROM traces — pose sine/cosine (top), body twist (bottom)", fontsize=11)
 
     # line styles are shared across trajectories, so the legend uses neutral proxies
     style_key = [Line2D([], [], color="black", linewidth=0.8, label="actual"),

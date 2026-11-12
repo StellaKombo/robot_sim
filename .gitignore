@@ -4,5 +4,6 @@
 **/MUJOCO_LOG.TXT
 /data/data/
 /data/pilots
+/data/finetune_*/
 KCF_MPC/
 /tests

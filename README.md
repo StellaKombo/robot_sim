@@ -172,9 +172,101 @@ python data/plot_23dof_data.py            # GPU dataset _01
 python data/plot_23dof_data.py lissajous  # the run saved with --log lissajous
 ```
 
-Reduced-order — Matplotlib plots of `q_rom` / `v_rom` (with body-frame cmd
-overlay) plus a looping 2D top-down animation with heading triangles:
+Reduced-order — Matplotlib plots of `[px, py, sin(theta), cos(theta)]` and `v_rom`
+(with body-frame cmd overlay), plus a looping 2D top-down animation with heading triangles:
 ```bash
 python data/plot_rom_data.py            # GPU dataset _01
 python data/plot_rom_data.py lissajous  # the run saved with --log lissajous
 ```
+
+The saved ROM logger still uses `[px, py, theta]`; plotting derives the sine/cosine
+pair without changing old files. This matches the MPC heading features. A wrapped
+heading-error angle in degrees is still a valid diagnostic, not a legacy yaw-state cost.
+
+To replay two controller runs together at real-time speed, independently of their
+original solver speeds (from `robot_sim`):
+
+```bash
+python data/compare_rom_data.py kcf_01 si_01
+```
+
+This opens overlaid ROM playback on one shared axis, with measured heading triangles,
+trails, and hollow reference triangles. Both recordings advance on one monotonic
+clock: one simulated second per wall-clock second. Close the playback window to stop.
+The static comparison shows sine/cosine heading, world position, body velocity,
+applied commands and the reference reconstructed from each saved `trial_plan.json`.
+It does not rerun physics or the controllers and never substitutes today's default
+path for missing saved metadata. Changed-source/incomplete runs and mismatched
+references/initial poses are flagged as warnings, not silently treated as a fair benchmark.
+
+The two positional arguments can also be run directories or ROM NPZ files.
+Overlay is the default (`--overlay` remains accepted). Use `--side-by-side` for
+separate axes, `--once` for one pass,
+`--speed 0.5` for half speed, and `--start 10 --end 35` for an interval. Default
+speed is `1.0`, render rate is 50 Hz, and environment index is zero (`--env-index`).
+Different logging periods are synchronized by simulation time; playback stops at
+the shorter recording's end and skips obsolete frames if rendering falls behind.
+
+Save the new plots alongside the tuning comparison, without a GUI:
+
+```bash
+MPLBACKEND=Agg python data/compare_rom_data.py kcf_01 si_01 \
+  --no-playback --output-dir KCF_MPC/reports/mpc_tuning_sincos_v1
+```
+
+This writes `rom_states.png` and `rom_playback_preview.png`. For reuse in another
+plotting script, `compare_rom_data.py` exposes `plot_rom_comparison(...)`,
+`playback_rom_comparison(...)`, and `ROMComparisonPlayback.update(sim_time)`.
+
+### Inspect RL policy outputs versus MPC commands
+
+The ROM velocity plots show achieved base motion, not the RL network's outputs.
+The trial records already contain those outputs in `applied_policy_commands.npz`.
+To compare both controllers without rerunning simulation:
+
+```bash
+python data/plot_policy_actions.py kcf_01 si_01 --start 10 --zoom 6
+```
+
+This opens three diagnostic figures: MPC commands / raw RL actions / desired and
+measured joint angles / per-tick target changes; frequency spectra; and a summary
+of variation across all 23 joints. Blue is the first run, red the second. The
+default time zoom shows 10–16 s; spectra and summary use 10 s through the last
+common recorded RL output. `--end` restricts that analysis interval. Choose other
+joints with `--joints right_hip_pitch right_knee right_ankle_pitch` or numeric
+zero-based indices (one to six joints). No smoothing is applied to the time traces.
+
+The loader shifts `previous_policy_action[t]` to its actual output time
+`t-control_dt`, excludes the artificial startup history, and aligns the commands
+and measured joint angles accordingly. It reconstructs desired angles from the
+policy action scale plus nominal joint pose, verifying saved configuration hashes
+when available. A changed historical policy config is rejected rather than silently
+using wrong scaling. The final policy output is not present in the previous-action
+log, so the analysis ends slightly before the full simulation duration.
+
+Look for irregular tick-to-tick jitter, excessive target changes relative to SI,
+and extra spectral power between gait-related peaks. The known 0.6 s gait rhythm
+(about 1.67 Hz) and harmonics are expected motion, not automatically noise. Likewise,
+the shaded frequency band (`--cutoff-hz 5`) is an illustrative diagnostic, not a
+noise threshold. Contacts and nonlinear feedback can also produce higher frequencies;
+these plots alone do not prove that MPC is the cause of a fluctuation.
+
+Save headlessly alongside the MPC comparison:
+
+```bash
+MPLBACKEND=Agg python data/plot_policy_actions.py kcf_01 si_01 \
+  --output-dir KCF_MPC/reports/mpc_tuning_sincos_v1/rl_actions --no-show
+```
+
+This writes `policy_time_traces.png`, `policy_spectra.png`,
+`policy_joint_summary.png`, and `policy_metrics.json`. It does not change any
+controller weights, policy outputs, filters or simulation logging.
+
+### Offline MPC-data fine-tuning
+
+For the optional Muon/AdamW workflow with original-data replay, four MPC reference
+families, held-out prediction checks and explicit control validation, see
+[`KCF_MPC/README.md`](KCF_MPC/README.md#conservative-mpc-data-fine-tuning-offline-opt-in).
+The original prepared dataset can remain on its training server, or be regenerated
+from the published epoch-1540 Git LFS sources. Collection and adaptation write
+fresh directories and never automatically replace the configured checkpoint.

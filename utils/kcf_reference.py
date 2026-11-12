@@ -5,6 +5,26 @@ Reference generation is independent of KCF weights and live MPC scheduling.
 import numpy as np
 
 
+def sincos_tracking_reference(reference):
+    """Convert [..., px, py, theta, body twist, gravity] targets to ten features.
+
+    Pose inputs and saved scenario settings retain their public nine-value
+    format. Only the optimizer reference expands heading into a unit pair.
+    """
+    reference = np.asarray(reference)
+    if reference.ndim == 0 or reference.shape[-1] != 9:
+        raise ValueError("Pose/twist reference must end with nine values")
+    return np.concatenate(
+        (
+            reference[..., :2],
+            np.sin(reference[..., 2:3]),
+            np.cos(reference[..., 2:3]),
+            reference[..., 3:],
+        ),
+        axis=-1,
+    )
+
+
 class PlanarReference:
     """Configured fixed or Lissajous path, preserving continuous tangent yaw."""
 
@@ -57,8 +77,8 @@ class PlanarReference:
         vx, vy = a * w * np.cos(w * t), 2 * b * w * np.cos(2 * w * t)
         ax, ay = -a * w**2 * np.sin(w * t), -4 * b * w**2 * np.sin(2 * w * t)
         theta = np.arctan2(vy, vx)
-        # Follow one continuous tangent-heading branch. Without this correction,
-        # atan2 injects a spurious 2*pi MPC error on the left side of the curve.
+        # Keep diagnostic heading plots continuous. The MPC cost uses the
+        # sine/cosine pair and is independent of this choice of angle branch.
         phase = np.remainder(w * t, 2 * np.pi)
         reverse_branch = ((phase >= 3 * np.pi / 4)
                           & (phase <= 5 * np.pi / 4)
@@ -68,7 +88,7 @@ class PlanarReference:
         return np.stack([px, py, theta], axis=-1), np.stack([vx, vy, wz], axis=-1)
 
     def track(self, q_ref, v_ref):
-        """Build MPC [world pose, body twist, gravity] references."""
+        """Build ten MPC [world position, heading sine/cosine, twist, gravity] targets."""
         cos_yaw, sin_yaw = np.cos(q_ref[..., 2]), np.sin(q_ref[..., 2])
         v_ref_body = np.stack(
             [cos_yaw * v_ref[..., 0] + sin_yaw * v_ref[..., 1],
@@ -77,4 +97,6 @@ class PlanarReference:
             axis=-1,
         )
         gravity_ref = np.broadcast_to(self.state[6:9], q_ref.shape)
-        return np.concatenate([q_ref, v_ref_body, gravity_ref], axis=-1)
+        return sincos_tracking_reference(
+            np.concatenate([q_ref, v_ref_body, gravity_ref], axis=-1)
+        )
