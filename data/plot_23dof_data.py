@@ -140,15 +140,10 @@ def playback_trajectories(xml_path, q_sel, v_sel, log_dt, idx, render_hz=50.0,
 
 def main():
 
-    # which file: a simulation.py run from data/data/<run>/, else parallel_sim's dataset _01
-    parser = argparse.ArgumentParser(description="Plot a saved run or dataset.")
-    parser.add_argument("run", nargs="?", default=None,
-                        help="run name given to simulation.py --log; omit for data/data/g1_23dof_data_01.npz")
+    parser = argparse.ArgumentParser(description="Plot and replay a named simulation run.")
+    parser.add_argument("run", help="run name saved under data/data/<run>/")
     args = parser.parse_args()
-    if args.run is None:
-        data_path = os.path.join(ROOT_DIR, "data", "data", "g1_23dof_data_01.npz")
-    else:
-        data_path = os.path.join(ROOT_DIR, "data", "data", args.run, "g1_23dof_data.npz")
+    data_path = os.path.join(ROOT_DIR, "data", "data", args.run, "g1_23dof_data.npz")
     xml_path = os.path.join(ROOT_DIR, "models", "g1_23dof.xml")
 
     # trajectories to plot

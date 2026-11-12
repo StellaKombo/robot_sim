@@ -247,7 +247,7 @@ class Simulation:
         """One physics step: PD torque toward the held action's joint targets, mj_step, log if due."""
         
         if self.log_name is not None and not self.log_q:
-            self._record()   # initial state, logged with the first command like parallel_sim
+            self._record()   # initial state, logged with the first command
         
         # PD torque toward the joint targets encoded by the held action
         qpos_des = self.action * self.cfg.action_scale + self.cfg.default_joint_pos
@@ -423,19 +423,19 @@ class Simulation:
         viewer.set_texts([timing, key])
 
     def save_log(self):
-        """Write the run to data/data/<log_name>/ in parallel_sim.py's format and file names."""
+        """Write full-order and ROM logs under data/data/<log_name>/."""
         
         if not self.log_q:
             print("Nothing logged; no file written.")
             return
         
-        # one folder per run under data/data/, next to parallel_sim's datasets
+        # one folder per run under data/data/
         out_dir = os.path.join(ROOT_DIR, "data", "data", self.log_name)
         os.makedirs(out_dir, exist_ok=True)
         full_path = os.path.join(out_dir, "g1_23dof_data.npz")
         rom_path = os.path.join(out_dir, "g1_rom_data.npz")
 
-        # batch dimension of 1, matching parallel_sim's (B, T, dim)
+        # preserve the recording schema's (B, T, dim) batch dimension
         q = np.stack(self.log_q)[None].astype(np.float32)
         v = np.stack(self.log_v)[None].astype(np.float32)
         cmd = np.stack(self.log_cmd)[None].astype(np.float32)

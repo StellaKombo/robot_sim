@@ -96,15 +96,3 @@ class G1KCFSinCosFrame:
         result = _values(state_local, "state_local", G1_SINCOS_STATE_DIM).copy()
         result[..., :4] = self._pose(result[..., :4], inverse=True)
         return result
-
-    def planar_pose_to_local(self, pose_world):
-        """Transform the three pose features used by the tracking reference."""
-        pose = _values(pose_world, "pose_world", 3)
-        result = pose.copy()
-        position = np.zeros(
-            (*pose.shape[:-1], 3), dtype=np.result_type(pose.dtype, np.float64)
-        )
-        position[..., :2] = pose[..., :2]
-        result[..., :2] = self.frame.position_to_local(position)[..., :2]
-        result[..., 2] = pose[..., 2] - self.yaw_origin_world
-        return result

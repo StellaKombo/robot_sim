@@ -24,7 +24,7 @@ test:
 
 # Inspect the configured controller without starting physics or opening sockets.
 check:
-	python KCF_MPC/mpc/visual_recovery_trial.py handover_check --synchronous --headless --check
+	python KCF_MPC/scripts/visual_recovery_trial.py handover_check --synchronous --headless --check
 
 # remove the conda env (must not be active; conda refuses to remove the current env)
 uninstall:

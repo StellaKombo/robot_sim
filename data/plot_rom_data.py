@@ -162,36 +162,10 @@ def playback_rom_trajectories(q_rom_sel, log_dt, idx, render_hz=50.0,
 
 def main():
 
-    # which file: a simulation.py run from data/data/<run>/, else a ROM dataset
-    parser = argparse.ArgumentParser(description="Plot a saved run or dataset.")
-    parser.add_argument("run", nargs="?", default=None,
-                        help="run name given to simulation.py --log; omit to select a ROM dataset")
+    parser = argparse.ArgumentParser(description="Plot and replay a named simulation run.")
+    parser.add_argument("run", help="run name saved under data/data/<run>/")
     args = parser.parse_args()
-    if args.run is None:
-        script_dir = os.path.join(ROOT_DIR, "data")
-        data_path = os.path.join(
-            script_dir,
-            "data",
-            "g1_rom_B1024_T2500_zoh125_seed0_data_01.npz",
-        )
-
-        # if the specific file isn't present, try to find any matching rom dataset
-        if not os.path.exists(data_path):
-            candidates = []
-            search_dirs = [script_dir, os.path.join(script_dir, "data")]
-            for d in search_dirs:
-                if os.path.isdir(d):
-                    for fn in os.listdir(d):
-                        if fn.startswith("g1_rom_") and fn.endswith(".npz"):
-                            candidates.append(os.path.join(d, fn))
-            if candidates:
-                print(f"requested data file not found: {data_path}")
-                data_path = candidates[0]
-                print(f"using found dataset: {data_path}")
-            else:
-                raise FileNotFoundError(f"Could not find dataset: {data_path}")
-    else:
-        data_path = os.path.join(ROOT_DIR, "data", "data", args.run, "g1_rom_data.npz")
+    data_path = os.path.join(ROOT_DIR, "data", "data", args.run, "g1_rom_data.npz")
 
     # trajectories to plot
     num_trajectories = 3
