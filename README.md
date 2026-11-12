@@ -126,7 +126,20 @@ python sim/single/simulation.py --log lissajous --log_hz 200   # loagged at 200 
 - If the sim falls behind real time, it runs without sleeping until it catches up.
 - Timing affects the result, so two runs never match exactly.
 
+### Download the selected checkpoint's dataset
+
+The original source dataset for the selected epoch-1540 KCF checkpoint is also
+available in the `KCF_MPC` submodule through Git LFS. From this repository's root:
+```bash
+git submodule update --init --recursive
+git -C KCF_MPC lfs pull --include="datasets/raw/g1/kcf_collection_v1/*.npz"
+```
+This downloads 30 full-order source files (3.24 GiB). See the
+[collection README](https://github.com/StellaKombo/KCF_MPC/blob/8e65fbea2f7cf828ac0f5afbeeb97a3058f0550c/datasets/raw/g1/kcf_collection_v1/README.md) for
+checksums and instructions to regenerate its training, validation, and test data.
+
 ### Generate datasets (GPU)
+
 Runs batched MuJoCo Warp rollouts and writes both the full-order state and the
 reduced-order state for each rollout into `./data/data/`. Requires a CUDA GPU.
 ```bash
