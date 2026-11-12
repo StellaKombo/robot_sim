@@ -1,5 +1,10 @@
 # robot_sim
-Forward simulation of humanoid robot under a trained RL policies.
+MuJoCo simulation of the G1 humanoid under a frozen RL locomotion policy, with
+KCF model-predictive control and a single-integrator comparison predictor.
+
+The supported controller uses the original epoch-1540 checkpoint. Fine-tuned
+candidates were not accepted. See the [handover notes](KCF_MPC/docs/HANDOVER.md)
+for the formulation, known limitations, and next steps for real-time optimization.
 
 ## Overview
 - `models/` — MuJoCo XML and meshes for the G1 23-DoF humanoid.
@@ -30,14 +35,33 @@ The environment is defined in [`environment.yml`](environment.yml). From the rep
 make install
 conda activate robot_sim
 ```
-This fetches the `KCF_MPC` submodule if it's missing, creates the `robot_sim` env, and sets `ROBOT_SIM_ROOT_DIR` to this
-repo, scoped to the env. To move `KCF_MPC` to the latest commit on its `main`, run
-`git submodule update --remote KCF_MPC`, then commit the new pointer.
+This fetches the recorded `KCF_MPC` submodule commit and selected model weights,
+creates the `robot_sim` env, and sets `ROBOT_SIM_ROOT_DIR` to this checkout, scoped
+to the env. Keep the recorded submodule revision; do not update to an arbitrary
+remote tip. A detached HEAD inside the submodule is normal for a fresh clone.
+No training dataset is required for MPC inference. The default JAX backend needs
+a CUDA-12-compatible NVIDIA driver and GPU access.
 If `environment.yml` changes, update the existing env in place:
 ```bash
 make update
 
 ```
+
+Check the configuration without running physics:
+
+```bash
+make check
+```
+
+For development tests, install the optional dependencies in the active environment:
+
+```bash
+python -m pip install -r requirements-dev.txt
+make test
+```
+
+Tests use CPU JAX and a non-interactive plotting backend. GPU-only checks skip
+when CUDA is unavailable. These are regression checks, not real-time qualification.
 To remove the environment:
 ```bash
 conda deactivate  # if the env is active
@@ -115,7 +139,7 @@ Reusing a name overwrites that run. Plot it with `python data/plot_rom_data.py e
 The state is logged at 100 Hz by default. Set another rate with `--log_hz`, which must divide the
 500 Hz sim rate (e.g. 500, 250, 100, 50).
 ```bash
-python sim/single/simulation.py --log lissajous --log_hz 200   # loagged at 200 Hz
+python sim/single/simulation.py --log lissajous --log_hz 100   # logged at 100 Hz
 ```
 
 #### Behavior to know
@@ -262,11 +286,15 @@ This writes `policy_time_traces.png`, `policy_spectra.png`,
 `policy_joint_summary.png`, and `policy_metrics.json`. It does not change any
 controller weights, policy outputs, filters or simulation logging.
 
-### Offline MPC-data fine-tuning
+### Research history and handover
 
-For the optional Muon/AdamW workflow with original-data replay, four MPC reference
-families, held-out prediction checks and explicit control validation, see
-[`KCF_MPC/README.md`](KCF_MPC/README.md#conservative-mpc-data-fine-tuning-offline-opt-in).
-The original prepared dataset can remain on its training server, or be regenerated
-from the published epoch-1540 Git LFS sources. Collection and adaptation write
-fresh directories and never automatically replace the configured checkpoint.
+The retired fine-tuning workflow, one-off tuning drivers, and machine-specific
+sweep launch files are preserved on `precleanup/finetuning-2026-11-12` in both
+repositories. They are not alternate supported controllers in this checkout.
+See the [fine-tuning results](KCF_MPC/docs/finetuning_summary.md) and
+[real-time MPC handover](KCF_MPC/docs/HANDOVER.md).
+
+Raw/processed datasets, recordings, rejected checkpoints, and compilation caches
+are local ignored artifacts, not part of a fresh source checkout. Cleanup does
+not erase those local research records. Never load an untrusted model checkpoint
+or reuse another user's writable JAX compilation cache.

@@ -2,8 +2,15 @@
 **/.vscode/
 **/.claude/
 **/MUJOCO_LOG.TXT
-/data/data/
-/data/pilots
-/data/finetune_*/
-KCF_MPC/
-/tests
+# Keep plotting source under data/; recordings and offline experiments stay local.
+/data/*
+!/data/*.py
+/.pytest_cache/
+/.coverage
+/htmlcov/
+*.py[cod]
+*.log
+.env
+.env.*
+!.env.example
+.venv/
