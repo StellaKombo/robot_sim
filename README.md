@@ -9,7 +9,7 @@ real-time-qualified implementation. See the [formulation and handover](KCF_MPC/d
 
 ## Install
 
-Install Conda, `make`, and Git LFS, then clone with the recorded submodule:
+Install Conda, `make`, Git LFS and a C++17-capable `g++`, then clone with the recorded submodule:
 
 ```bash
 git clone --recurse-submodules <this repo's URL>
@@ -24,6 +24,9 @@ creates the environment in [environment.yml](environment.yml), and sets
 `ROBOT_SIM_ROOT_DIR` for that environment. A detached submodule HEAD is normal.
 Do not update the submodule to an arbitrary remote tip. No training data is needed.
 The default JAX backend needs a CUDA-12-compatible NVIDIA driver and GPU access.
+The fixed KCF CUDA kernels compile once at startup using the CUDA tools bundled
+with the Python environment and `g++`. Unsupported GPU occupancy or compilation
+fails explicitly; there is no silent fallback to the slower GPU implementation.
 For an existing environment, use `make update` after dependency changes.
 
 Regression tests are kept locally by maintainers, not shipped in this checkout.
@@ -55,8 +58,11 @@ CUDA_VISIBLE_DEVICES=0 python KCF_MPC/scripts/visual_recovery_trial.py si_01 \
 
 Omit `--headless` to open the MuJoCo viewer. Synchronous mode pauses physics
 during each MPC solve: 20 simulated seconds can take longer in wall time.
-The figure-eight trial requires lockstep. For asynchronous figure-eight testing,
-use the two-process commands below; fixed-target trials can omit `--synchronous`.
+Omit `--synchronous` for asynchronous trials, including figure-eight testing.
+The native GPU evaluator is now selected, but measured solves still exceed
+20 ms. Fresh matched 20-second tests passed synchronous and asynchronous
+quality/reliability gates in balanced mode; this is not universal or real-time
+qualification. See the [handover and qualification scope](KCF_MPC/docs/HANDOVER.md#profiling-and-acceptance).
 `--check` prints the complete plan without starting physics.
 
 Both figure-eight runs use the same scenario, cost and command bounds; SI changes
@@ -66,7 +72,8 @@ Without `--lissajous`, the trial tests fixed-target recovery with a continuous
 hold requirement and timeouts. The existing trial08 profile uses `gtol=0.003`;
 the direct controller uses `gtol=0.0015`. Cleanup does not retune either.
 
-The nine files in `KCF_MPC/mpc/` are the controller library. Simulation,
+`KCF_MPC/mpc/` is the controller library; `mpc/native/` contains its fixed CUDA
+rollout and JAX FFI bridge. Simulation,
 validation, replay and profiling entry points are in
 [KCF_MPC/scripts/](KCF_MPC/scripts/README.md), not alternate controllers.
 
@@ -142,15 +149,3 @@ deployment. Do not run multiple command sources together.
 - `KCF_MPC/config/mpc_config.py`: selected checkpoint and numerical settings.
 - `KCF_MPC/models/`, `KCF_MPC/mpc/`: learned-model inference and MPC library.
 - `KCF_MPC/scripts/`, `data/*.py`: simulation runs, validation and diagnostics.
-
-Regression suites under both `tests/` folders stay local and are ignored by Git.
-
-Offline training, preprocessing, dataset collection, model-evaluation CLIs, old
-MPC paths and experimental fine-tuning tooling are outside this handover. Their
-source is recoverable from `precleanup/finetuning-2026-11-12` in both repositories.
-See the [fine-tuning conclusion](KCF_MPC/docs/finetuning_summary.md) and
-[cleanup verification](KCF_MPC/docs/cleanup_verification.md).
-
-Local datasets, recordings, rejected weights and caches are ignored, not erased.
-Only the selected model's inference/provenance files are shipped. Never load an
-untrusted checkpoint or share another user's writable JAX compilation cache.

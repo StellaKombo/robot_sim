@@ -215,12 +215,14 @@ class KCFCommand(CommandSource):
                 )
                 if not result.success:
                     raise RuntimeError(f"MPC initialization failed: {result.message}")
-                # Compile the same model's existing rollout before live publishing.
-                predict_handover_state(
-                    self.mpc,
-                    initial,
-                    np.zeros((self.handover_timing.initial, 3), np.float32),
-                )
+                # Variable-length prefixes must never trigger compilation on a
+                # live tick. No optimizer/RNG changes occur in these rollouts.
+                if not self.synchronous_feedback:
+                    for steps in range(self.handover_timing.minimum,
+                                       self.handover_timing.maximum + 1):
+                        predict_handover_state(
+                            self.mpc, initial, np.zeros((steps, 3), np.float32),
+                        )
                 if not self.quiet:
                     print(
                         f"[MPC L-BFGS-B initialization] backend={self.backend_label} "
