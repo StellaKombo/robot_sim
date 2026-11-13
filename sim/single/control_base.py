@@ -20,7 +20,7 @@ import zmq
 ROOT_DIR = os.getenv("ROBOT_SIM_ROOT_DIR",
                      os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, ROOT_DIR)
-from policy.config import G1Config
+from policy.walk.config import G1Config
 from utils.zmq_utils import CMD_PORT, STATE_PORT, connect_pub, connect_sub, pack_twist, unpack_state
 
 
@@ -30,7 +30,7 @@ from utils.zmq_utils import CMD_PORT, STATE_PORT, connect_pub, connect_sub, pack
 
 @dataclass
 class RobotState:
-    """Full robot state from simulation.py, as of its latest policy tick."""
+    """Full robot state from simulation_*.py, as of its latest policy tick."""
     t: float           # [s] sim time
     q: np.ndarray      # (nq,) base position (3), base quaternion wxyz (4), joint positions
     v: np.ndarray      # (nv,) base linear vel, world frame (3), base angular vel, body frame (3), joint vels
@@ -94,8 +94,7 @@ def run(cmd_source: CommandSource, cfg: G1Config):
     cmd_pub = connect_pub(ctx, CMD_PORT)
     state_sub = connect_sub(ctx, STATE_PORT)
     period = cfg.control_dt
-    nu = len(cfg.default_joint_pos)
-    print(f"Publishing commands to simulation.py on port {CMD_PORT} at {1.0 / period:.0f} Hz, "
+    print(f"Publishing commands to simulation_*.py on port {CMD_PORT} at {1.0 / period:.0f} Hz, "
           f"reading its state on port {STATE_PORT}.")
 
     state = nominal_state(cfg)
@@ -106,12 +105,15 @@ def run(cmd_source: CommandSource, cfg: G1Config):
         while True:
             # newest state from the sim, if a new one arrived
             try:
-                t, q, v, prev_action = unpack_state(state_sub.recv(zmq.NOBLOCK), 7 + nu, 6 + nu, nu)
+                # robot size from the message (1 + nq + nv + nu = 14 + 3 nu), so walk and jog sims both work
+                buf = state_sub.recv(zmq.NOBLOCK)
+                nu = (len(buf) // 8 - 14) // 3
+                t, q, v, prev_action = unpack_state(buf, 7 + nu, 6 + nu, nu)
                 state = RobotState(t=t, q=q, v=v, prev_action=prev_action)
 
                 # zero the controller clock at the first state, and again if sim time jumps back (restart)
                 if not have_state or t < last_t:
-                    print(f"Receiving state from simulation.py; zeroing controller time at sim t = {t:.2f} s.")
+                    print(f"Receiving state from simulation_*.py; zeroing controller time at sim t = {t:.2f} s.")
                     cmd_source.t_start = t
                     have_state = True
                 last_t = t
@@ -139,7 +141,7 @@ def run(cmd_source: CommandSource, cfg: G1Config):
 def main(source_class: type, description: str):
     """Entry point for each control_*.py: build the source and run until Ctrl+C."""
     # no flags; parsing still gives --help and rejects typos
-    parser = argparse.ArgumentParser(description=f"{description} (pair with simulation.py).")
+    parser = argparse.ArgumentParser(description=f"{description} (pair with simulation_*.py).")
     parser.parse_args()
 
     # build the source and publish until Ctrl+C

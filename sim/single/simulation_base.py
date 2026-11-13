@@ -1,11 +1,12 @@
 ##
 #
-#  Simulation
+#  Simulation base: everything a single-robot sim needs except the policy.
+#  simulation_walk.py and simulation_jog.py subclass SimulationBase and supply the gains,
+#  nominal pose, observation, policy call and log file names.
 #
 ##
 
 # standard imports
-import argparse
 import contextlib
 import math
 import os
@@ -15,7 +16,6 @@ import time
 
 # third-party imports
 import numpy as np
-import torch
 import mujoco
 import mujoco.viewer
 import zmq
@@ -24,18 +24,16 @@ import zmq
 ROOT_DIR = os.getenv("ROBOT_SIM_ROOT_DIR",
                      os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, ROOT_DIR)
-from policy.actor import load_policy
-from policy.config import G1Config
-from utils.math_utils import gravity_from_quat, q_to_rom, v_to_rom
+from utils.math_utils import q_to_rom, v_to_rom
 from utils.zmq_utils import CMD_PORT, STATE_PORT, bind_pub, bind_sub, pack_state, unpack_twist
 
 # GLOBAL VARIABLES
-XML_PATH = os.path.join(ROOT_DIR, "models", "g1_23dof.xml")
-POLICY_PATH = os.path.join(ROOT_DIR, "policy", "g1_23dof_vel.pt")
 SIM_DT = 0.002      # [s] physics timestep
 LOG_HZ = 100.0      # [Hz] default logging rate; must divide the sim rate exactly
 RENDER_HZ = 50.0    # [Hz] visual rendering frequency
 CMD_TIMEOUT = 0.5   # [s] without a command from a controller before falling back to zero
+CAM_KEY = 67        # [C] toggles camera tracking of the pelvis, as in deploy_robot's simulation
+CAM_MSG_SEC = 2.0   # [s] how long the camera-mode line stays up after a [C] press
 
 # world-frame RGB triad at the origin (X=red, Y=green, Z=blue), as in mj-nlp's replay
 AXIS_LEN = 0.2        # [m] length of each axis cylinder
@@ -128,22 +126,41 @@ class Pacer:
 
 
 ############################################################################
-# SIMULATION
+# SIMULATION BASE
 ############################################################################
 
-class Simulation:
-    """G1 in MuJoCo running the velocity policy, driven by twist commands from a control_*.py.
+class SimulationBase:
+    """G1 in MuJoCo running a policy, driven by twist commands from a control_*.py.
 
     The policy runs every control_dt in lockstep with physics, and PD runs every physics step.
     Before a controller connects, or after CMD_TIMEOUT seconds without a message, the command
-    is zero.
+    is zero. Subclasses set the attributes listed in __init__, then implement the hooks below.
     """
 
-    def __init__(self, xml_path: str, policy_path: str, sim_dt: float, robot_cfg: G1Config = None,
-                 headless: bool = False, log_name: str = None, log_hz: float = LOG_HZ):
-        # config and run options
-        self.cfg = robot_cfg or G1Config()
-        self.nu = len(self.cfg.Kp)
+    # hooks for subclasses
+    full_log_name = None   # full-order log file name, e.g. "g1_23dof_data.npz"
+    rom_log_name = None    # reduced-order log file name, e.g. "g1_rom_data.npz"
+
+    def reset_policy(self):
+        """Clear any policy memory (gait clock, recurrent state) at reset."""
+
+    def set_cmd(self, cmd: np.ndarray):
+        """Turn a controller's body-frame [vx, vy, wz] into the command the policy sees."""
+        raise NotImplementedError
+
+    def compute_action(self) -> np.ndarray:
+        """One policy query from the current state; returns the (nu,) action."""
+        raise NotImplementedError
+
+    def log_extras(self) -> dict:
+        """Extra arrays to save with the log, each shaped (1, T, ...)."""
+        return {}
+
+    def __init__(self, xml_path: str, sim_dt: float, headless: bool = False,
+                 log_name: str = None, log_hz: float = LOG_HZ):
+        # set by the subclass before calling this: control_dt, Kp, Kd, action_scale,
+        # default_base_pos (7,) and default_joint_pos (nu,), all as numpy arrays / floats
+        self.nu = len(self.Kp)
         self.headless = headless
         self.log_name = log_name     # run name; the log goes to data/data/<log_name>/
 
@@ -151,16 +168,23 @@ class Simulation:
         self.model = load_model(xml_path)
         self.model.opt.timestep = sim_dt
         self.data = mujoco.MjData(self.model)
-        
-        # pelvis gyro's slot in sensordata, looked up by name
+        assert self.model.nu == self.nu, f"model has {self.model.nu} actuators, policy {self.nu}"
+
+        # pelvis IMU slots in sensordata, looked up by name
         gyro_adr = self.model.sensor("pelvis_imu_gyro_sensor").adr[0]
         self.gyro_slice = slice(gyro_adr, gyro_adr + 3)
         self.pelvis_id = self.model.body("pelvis").id
 
+        # [C] camera tracking of the pelvis; set on the viewer thread, applied in _render
+        self.cam_track = False
+        self._cam_dirty = False
+        self._contact_points = False
+        self._cam_msg_until = 0.0
+
         # physics steps per policy query
-        ratio = self.cfg.control_dt / sim_dt
+        ratio = self.control_dt / sim_dt
         if not math.isclose(ratio, round(ratio), abs_tol=1e-9):
-            raise ValueError(f"sim_dt ({sim_dt}) must divide control_dt ({self.cfg.control_dt}) exactly.")
+            raise ValueError(f"sim_dt ({sim_dt}) must divide control_dt ({self.control_dt}) exactly.")
         self.decimation = int(round(ratio))
 
         # physics steps per logged sample
@@ -169,23 +193,17 @@ class Simulation:
             raise ValueError(f"log_hz ({log_hz}) must divide the sim rate ({1.0 / sim_dt:g} Hz) exactly.")
         self.log_decimation = int(round(log_ratio))
         self.log_dt = self.log_decimation * sim_dt
-
-        # policy
-        self.device = torch.device("cpu")
-        self.policy = load_policy(policy_path, self.device)
-        self.cmd_scale = np.asarray(self.cfg.cmd_scale, dtype=np.float32)
-        self.default_j = np.asarray(self.cfg.default_joint_pos, dtype=np.float32)
         self.reset()
 
     def reset(self):
         """Nominal pose, zero velocity, zero command, cleared policy memory and log."""
-        
+
         # robot at the nominal pose, at rest
-        self.data.qpos[:7] = self.cfg.default_base_pos
-        self.data.qpos[7:7 + self.nu] = self.cfg.default_joint_pos
+        self.data.qpos[:7] = self.default_base_pos
+        self.data.qpos[7:7 + self.nu] = self.default_joint_pos
         self.data.qvel[:] = 0.0
         self.data.time = 0.0
-        
+
         # zero command, fresh policy memory, empty log
         self.cmd = np.zeros(3, dtype=np.float32)
         self.ref = None   # controller's reference point [x, y], drawn when set
@@ -193,68 +211,32 @@ class Simulation:
         self.action = self.prev_action.copy()
         self.n_steps = 0   # physics steps since reset, to pace logging
         self.log_q, self.log_v, self.log_cmd = [], [], []
-        
+        self.reset_policy()
+
         # recompute kinematics and sensors for the new state
         mujoco.mj_forward(self.model, self.data)
 
-    # COMMAND
-
-    def set_cmd(self, cmd: np.ndarray):
-        """Body-frame [vx, vy, wz], clipped to the policy's training range."""
-        self.cmd = np.clip(np.asarray(cmd, dtype=np.float32), -self.cmd_scale, self.cmd_scale)
-
     # POLICY
 
-    def build_observation(self) -> torch.Tensor:
-        """80-dim policy observation, in the exact layout the policy was trained on."""
-        
-        d = self.data
-        
-        # sensor readings, cast to float32 as in training
-        omega = d.sensordata[self.gyro_slice].astype(np.float32)
-        gravity = gravity_from_quat(d.qpos[3:7].astype(np.float32))
-        qpos_j = d.qpos[7:7 + self.nu].astype(np.float32)
-        qvel_j = d.qvel[6:6 + self.nu].astype(np.float32)
-
-        # gait clock from sim time, zeroed below stand_cmd_threshold
-        phase = (d.time % self.cfg.gait_period) / self.cfg.gait_period
-        gait_phase = np.array([math.sin(2.0 * math.pi * phase), math.cos(2.0 * math.pi * phase)],
-                              dtype=np.float32)
-        if np.linalg.norm(self.cmd) < self.cfg.stand_cmd_threshold:
-            gait_phase[:] = 0.0
-
-        # assemble in the order the policy was trained on
-        obs = np.concatenate([
-            omega,                      # 0:3
-            gravity,                    # 3:6
-            self.cmd,                   # 6:9
-            gait_phase,                 # 9:11
-            qpos_j - self.default_j,    # 11:34
-            qvel_j,                     # 34:57
-            self.prev_action,           # 57:80
-        ]).astype(np.float32)
-        return torch.from_numpy(obs).unsqueeze(0).to(self.device)
-
     def policy_step(self):
-        """One policy query; the action is held until the next one."""
-        # run the policy; the action also feeds the next observation
-        self.action = self.policy(self.build_observation()).squeeze(0).cpu().numpy().astype(np.float32)
+        """One policy query; the action is held until the next one and feeds the next observation."""
+        self.action = np.asarray(self.compute_action(), dtype=np.float32)
         self.prev_action = self.action
 
     # PHYSICS
 
     def step(self):
         """One physics step: PD torque toward the held action's joint targets, mj_step, log if due."""
-        
+
         if self.log_name is not None and not self.log_q:
-            self._record()   # initial state, logged with the first command like parallel_sim
-        
+            self._record()   # initial state, logged with the first command like the parallel sims
+
         # PD torque toward the joint targets encoded by the held action
-        qpos_des = self.action * self.cfg.action_scale + self.cfg.default_joint_pos
+        qpos_des = self.action * self.action_scale + self.default_joint_pos
         qpos_j = self.data.qpos[7:7 + self.nu]
         qvel_j = self.data.qvel[6:6 + self.nu]
-        self.data.ctrl[:] = self.cfg.Kp * (qpos_des - qpos_j) + self.cfg.Kd * (-qvel_j)
-        
+        self.data.ctrl[:] = self.Kp * (qpos_des - qpos_j) + self.Kd * (-qvel_j)
+
         # advance physics, then log the new state every log_decimation steps
         mujoco.mj_step(self.model, self.data)
         self.n_steps += 1
@@ -271,7 +253,7 @@ class Simulation:
 
     def run(self, duration: float = None):
         """Real time until the viewer closes; each policy tick sends the state, then reads a command."""
-        
+
         # command and state sockets, optional step budget, and real-time pacer
         ctx = zmq.Context.instance()
         cmd_sub = bind_sub(ctx, CMD_PORT)
@@ -294,7 +276,7 @@ class Simulation:
                 self.rtr_last = (self.data.time, next_render)    # for the legend's real-time rate
                 k = 0
                 while (n_steps is None or k < n_steps) and (viewer is None or viewer.is_running()):
-        
+
                     # policy tick: send the state, read the newest command, check timeout, run policy
                     if k % self.decimation == 0:
                         state_pub.send(pack_state(self.data.time, self.data.qpos, self.data.qvel,
@@ -313,7 +295,7 @@ class Simulation:
                             if not warned_bad_msg:
                                 print(f"Ignoring a malformed command ({err}). Restart the controller.")
                                 warned_bad_msg = True
-        
+
                         # controller went quiet: fall back to zero
                         if connected and time.perf_counter() - last_rx > CMD_TIMEOUT:
                             print(f"No command for {CMD_TIMEOUT} s; using zero command.")
@@ -345,10 +327,11 @@ class Simulation:
             return
         # launch, noting the render thread the viewer starts
         before = set(threading.enumerate())
-        viewer = mujoco.viewer.launch_passive(self.model, self.data,
+        viewer = mujoco.viewer.launch_passive(self.model, self.data, key_callback=self._key_callback,
                                               show_left_ui=False, show_right_ui=False)
         render_threads = [t for t in threading.enumerate() if t not in before]
-        
+        print("Press [C] in the viewer to toggle camera tracking of the pelvis.")
+
         # camera 3 m out, looking at pelvis height
         viewer.cam.azimuth = 140
         viewer.cam.elevation = -20
@@ -361,6 +344,31 @@ class Simulation:
             viewer.close()
             for t in render_threads:
                 t.join(timeout=2.0)
+
+    def _key_callback(self, keycode: int):
+        """Runs on the viewer thread: only flag a [C] press; _render applies it under the lock."""
+        if keycode == CAM_KEY:
+            self.cam_track = not self.cam_track
+            self._cam_dirty = True
+
+    def _apply_camera(self, viewer, now: float):
+        """Apply a [C] press (undoing the viewer's own C, contact points), then follow the pelvis if on.
+
+        Tracking moves only the look-at point, to the pelvis x, y at the start height, so the view
+        does not bob with each stride; azimuth, elevation and zoom stay the user's.
+        """
+        contact_flag = mujoco.mjtVisFlag.mjVIS_CONTACTPOINT
+        with viewer.lock():
+            if self._cam_dirty:
+                self._cam_dirty = False
+                self._cam_msg_until = now + CAM_MSG_SEC
+                viewer.opt.flags[contact_flag] = self._contact_points
+                viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+            else:
+                self._contact_points = bool(viewer.opt.flags[contact_flag])
+            if self.cam_track:
+                x, y = self.data.xpos[self.pelvis_id][:2]
+                viewer.cam.lookat[:] = (x, y, self.default_base_pos[2])
 
     def draw_overlays(self, scn: mujoco.MjvScene):
         """Append the reference ball and the commanded and actual twist arrows to `scn`, as in mjlab."""
@@ -384,11 +392,12 @@ class Simulation:
 
     def _render(self, viewer, next_render: float) -> float:
         """Sync the viewer if a frame is due; returns when the next one is due."""
-        
+
         # at most RENDER_HZ frames per second
         now = time.perf_counter()
         if viewer is None or now < next_render:
             return next_render
+        self._apply_camera(viewer, now)
         viewer.user_scn.ngeom = 0
         self.draw_overlays(viewer.user_scn)
         self.draw_legend(viewer, now)
@@ -409,7 +418,7 @@ class Simulation:
             f"Real time:   {now - self.wall_start:.2f}s\n"
             f"RTR:         {rtr:.2f}\n"
             f"Sim rate:    {1.0 / self.model.opt.timestep:.0f} Hz\n"
-            f"Render rate: {RENDER_HZ:.0f} Hz",
+            f"Render rate: {RENDER_HZ:.0f} Hz" + self._camera_line(now),
             "",
         )
 
@@ -422,59 +431,34 @@ class Simulation:
         )
         viewer.set_texts([timing, key])
 
+    def _camera_line(self, now: float) -> str:
+        """Camera mode for the legend, shown only for a moment after a [C] press."""
+        if now >= self._cam_msg_until:
+            return ""
+        return f"\nCamera:      {'tracking pelvis' if self.cam_track else 'free'}"
+
     def save_log(self):
-        """Write the run to data/data/<log_name>/ in parallel_sim.py's format and file names."""
-        
+        """Write the run to data/data/<log_name>/ in the matching parallel sim's format and file names."""
+
         if not self.log_q:
             print("Nothing logged; no file written.")
             return
-        
-        # one folder per run under data/data/, next to parallel_sim's datasets
+
+        # one folder per run under data/data/, next to the parallel sims' datasets
         out_dir = os.path.join(ROOT_DIR, "data", "data", self.log_name)
         os.makedirs(out_dir, exist_ok=True)
-        full_path = os.path.join(out_dir, "g1_23dof_data.npz")
-        rom_path = os.path.join(out_dir, "g1_rom_data.npz")
+        full_path = os.path.join(out_dir, self.full_log_name)
+        rom_path = os.path.join(out_dir, self.rom_log_name)
 
-        # batch dimension of 1, matching parallel_sim's (B, T, dim)
+        # batch dimension of 1, matching the parallel sims' (B, T, dim)
         q = np.stack(self.log_q)[None].astype(np.float32)
         v = np.stack(self.log_v)[None].astype(np.float32)
         cmd = np.stack(self.log_cmd)[None].astype(np.float32)
-        meta = dict(sim_dt=float(self.model.opt.timestep), control_dt=float(self.cfg.control_dt),
-                    log_dt=float(self.log_dt))
+        meta = dict(sim_dt=float(self.model.opt.timestep), control_dt=float(self.control_dt),
+                    log_dt=float(self.log_dt), **self.log_extras())
 
         # full-order file, then reduced-order file
         np.savez(full_path, q_log=q, v_log=v, cmd_log=cmd, **meta)
         np.savez(rom_path, q_rom_log=q_to_rom(q), v_rom_log=v_to_rom(q, v), cmd_log=cmd, **meta)
         print(f"Saved {q.shape[1]} samples at {1.0 / self.log_dt:g} Hz to {out_dir}/ "
-              "(g1_23dof_data.npz, g1_rom_data.npz).")
-
-
-############################################################################
-# MAIN
-############################################################################
-
-def main():
-
-    # parse command-line args
-    parser = argparse.ArgumentParser(description="Single-robot G1 simulation, driven by a control_*.py.")
-    parser.add_argument("--log", default=None, metavar="NAME",
-                        help="save the run to data/data/NAME/ when the sim exits")
-    parser.add_argument("--log_hz", type=float, default=LOG_HZ, metavar="HZ",
-                        help=f"logging rate; must divide the {1.0 / SIM_DT:g} Hz sim rate (default {LOG_HZ:g})")
-    args = parser.parse_args()
-
-    # build the sim and run until the viewer closes or Ctrl+C
-    robot_cfg = G1Config()
-    sim = Simulation(XML_PATH, POLICY_PATH, SIM_DT, robot_cfg, log_name=args.log, log_hz=args.log_hz)
-    try:
-        sim.run()
-    except KeyboardInterrupt:
-        print("\nStopped.")
-    finally:
-        # save even after Ctrl+C
-        if args.log is not None:
-            sim.save_log()
-
-
-if __name__ == "__main__":
-    main()
+              f"({self.full_log_name}, {self.rom_log_name}).")

@@ -135,15 +135,21 @@ def playback_rom_trajectories(q_rom_sel, log_dt, idx, render_hz=50.0,
 
 def main():
 
-    # which file: a simulation.py run from data/data/<run>/, else parallel_sim's dataset _01
+    # which file: a simulation_*.py run from data/data/<run>/, else a parallel_sim_*.py dataset
     parser = argparse.ArgumentParser(description="Plot a saved run or dataset.")
     parser.add_argument("run", nargs="?", default=None,
-                        help="run name given to simulation.py --log; omit for data/data/g1_rom_data_01.npz")
+                        help="run name given to simulation_walk.py / simulation_jog.py --log; omit for a GPU dataset")
+    policy = parser.add_mutually_exclusive_group(required=True)
+    policy.add_argument("--walk", action="store_true", help="23-DoF walk data (g1_rom_data*.npz)")
+    policy.add_argument("--jog", action="store_true", help="29-DoF jog data (g1_rom_jog_data*.npz)")
+    parser.add_argument("--dataset", type=int, default=1, help="GPU dataset number XX (default 1)")
     args = parser.parse_args()
     if args.run is None:
-        data_path = os.path.join(ROOT_DIR, "data", "data", "g1_rom_data_01.npz")
+        prefix = "g1_rom_jog" if args.jog else "g1_rom"
+        data_path = os.path.join(ROOT_DIR, "data", "data", f"{prefix}_data_{args.dataset:02d}.npz")
     else:
-        data_path = os.path.join(ROOT_DIR, "data", "data", args.run, "g1_rom_data.npz")
+        rom_file = "g1_rom_jog_data.npz" if args.jog else "g1_rom_data.npz"
+        data_path = os.path.join(ROOT_DIR, "data", "data", args.run, rom_file)
 
     # trajectories to plot
     num_trajectories = 3
@@ -164,6 +170,14 @@ def main():
     print(f"loaded: {data_path}")
     print(f"  B={B}, T={T}")
     print(f"  sim_dt={sim_dt}, control_dt={control_dt}, log_dt={log_dt}")
+
+    # jog datasets also carry fall flags and the command mode per step
+    if "fell" in data.files:
+        print(f"  fell: {int(data['fell'].sum())}/{B}")
+    if "mode_log" in data.files:
+        names = [str(m) for m in data["mode_names"]]
+        share = np.bincount(data["mode_log"].reshape(-1), minlength=len(names)) / data["mode_log"].size
+        print("  time share per mode: " + ", ".join(f"{n} {s:.0%}" for n, s in zip(names, share)))
 
     # sample trajectories to plot
     num = min(num_trajectories, B)

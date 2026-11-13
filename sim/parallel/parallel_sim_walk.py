@@ -1,6 +1,6 @@
 ##
 #
-#  Parallel G1 simulation using MuJoCo Warp (GPU) + PyTorch policy
+#  Parallel G1 23-DoF WALK simulation using MuJoCo Warp (GPU) + PyTorch policy
 #
 ##
 
@@ -25,8 +25,8 @@ import warp as wp
 ROOT_DIR = os.getenv("ROBOT_SIM_ROOT_DIR",
                      os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, ROOT_DIR)
-from policy.actor import load_policy
-from policy.config import G1Config
+from policy.walk.walk_actor import load_policy
+from policy.walk.config import G1Config
 from utils.math_utils import get_gravity_orientation_batch, q_to_rom, v_to_rom
 
 
@@ -449,8 +449,8 @@ if __name__ == "__main__":
     print(f"CUDA device: {torch.cuda.get_device_name(0)}")
 
     # paths
-    xml_path = os.path.join(ROOT_DIR, "models", "g1_23dof.xml")
-    policy_path = os.path.join(ROOT_DIR, "policy", "g1_23dof_vel.pt")
+    xml_path = os.path.join(ROOT_DIR, "models", "g1_23dof", "g1_23dof.xml")
+    policy_path = os.path.join(ROOT_DIR, "policy", "walk", "g1_23dof_vel.pt")
 
     # environment name (used for file naming)
     env_name = "g1_23dof"

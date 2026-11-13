@@ -1,6 +1,7 @@
 ##
 #
-#  Custom controller: your own logic -> body-frame [vx, vy, wz].
+#  Custom controller for the 23-DoF WALK sim (simulation_walk.py): your own logic -> body-frame
+#  [vx, vy, wz]. Runs the Koopman MPC on the walk-trained KCF model.
 #
 ##
 
@@ -9,7 +10,7 @@ import numpy as np
 
 # custom imports (control_base puts the repo root on sys.path for the imports after it)
 from control_base import ROOT_DIR, CommandSource, RobotState, main
-from policy.config import G1Config
+from policy.walk.config import G1Config
 from utils.math_utils import gravity_from_quat, q_to_rom, v_to_rom, world_to_body
 
 # import KCF
@@ -127,6 +128,11 @@ class CustomCommand(CommandSource):
 
     # feedback control based
     def get(self, state: RobotState) -> np.ndarray:
+
+        # walk only: the KCF state and model are 23-DoF (the placeholder before connecting is 23 too)
+        if len(state.prev_action) != 23:
+            raise SystemExit(f"control_custom_walk.py needs simulation_walk.py, but the sim sends a "
+                             f"{len(state.prev_action)}-joint state; for the jog sim use control_custom_jog.py.")
 
         # controller time: zero at the first state from the sim
         t = state.t - self.t_start

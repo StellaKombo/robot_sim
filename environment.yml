@@ -15,3 +15,5 @@ dependencies:
       - mujoco==3.16.0
       - mujoco-warp==3.16.0
       - warp-lang==1.18.0
+      - onnx==1.23.2
+      - onnxruntime==1.31.1

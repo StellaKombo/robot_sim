@@ -10,8 +10,8 @@ import zmq
 
 # both run on this PC; the sim binds both ports and the controller connects
 HOST = "127.0.0.1"
-CMD_PORT = 5555     # control_*.py -> simulation.py: body-frame [vx, vy, wz] (+ reference point)
-STATE_PORT = 5556   # simulation.py -> control_*.py: sim time, qpos, qvel, previous policy action
+CMD_PORT = 5555     # control_*.py -> simulation_*.py: body-frame [vx, vy, wz] (+ reference point)
+STATE_PORT = 5556   # simulation_*.py -> control_*.py: sim time, qpos, qvel, previous policy action
 
 
 ############################################################################

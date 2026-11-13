@@ -107,7 +107,7 @@ def playback_trajectories(xml_path, q_sel, v_sel, log_dt, idx, render_hz=50.0,
     with mujoco.viewer.launch_passive(
         model, data, show_left_ui=False, show_right_ui=False
     ) as viewer:
-        # camera angle matches simulation.py
+        # camera angle matches simulation_base.py
         viewer.cam.azimuth = 140
         viewer.cam.elevation = -20
         viewer.cam.distance = 4.0
@@ -140,16 +140,16 @@ def playback_trajectories(xml_path, q_sel, v_sel, log_dt, idx, render_hz=50.0,
 
 def main():
 
-    # which file: a simulation.py run from data/data/<run>/, else parallel_sim's dataset _01
+    # which file: a simulation_walk.py run from data/data/<run>/, else parallel_sim_walk's dataset _01
     parser = argparse.ArgumentParser(description="Plot a saved run or dataset.")
     parser.add_argument("run", nargs="?", default=None,
-                        help="run name given to simulation.py --log; omit for data/data/g1_23dof_data_01.npz")
+                        help="run name given to simulation_walk.py --log; omit for data/data/g1_23dof_data_01.npz")
     args = parser.parse_args()
     if args.run is None:
         data_path = os.path.join(ROOT_DIR, "data", "data", "g1_23dof_data_01.npz")
     else:
         data_path = os.path.join(ROOT_DIR, "data", "data", args.run, "g1_23dof_data.npz")
-    xml_path = os.path.join(ROOT_DIR, "models", "g1_23dof.xml")
+    xml_path = os.path.join(ROOT_DIR, "models", "g1_23dof", "g1_23dof.xml")
 
     # trajectories to plot
     num_trajectories = 3
