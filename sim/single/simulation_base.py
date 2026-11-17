@@ -156,6 +156,10 @@ class SimulationBase:
         """Extra arrays to save with the log, each shaped (1, T, ...)."""
         return {}
 
+    def full_log_extras(self) -> dict:
+        """Extra full-order arrays; keep large policy records out of the ROM file."""
+        return {}
+
     def __init__(self, xml_path: str, sim_dt: float, headless: bool = False,
                  log_name: str = None, log_hz: float = LOG_HZ):
         # set by the subclass before calling this: control_dt, Kp, Kd, action_scale,
@@ -458,7 +462,7 @@ class SimulationBase:
                     log_dt=float(self.log_dt), **self.log_extras())
 
         # full-order file, then reduced-order file
-        np.savez(full_path, q_log=q, v_log=v, cmd_log=cmd, **meta)
+        np.savez(full_path, q_log=q, v_log=v, cmd_log=cmd, **meta, **self.full_log_extras())
         np.savez(rom_path, q_rom_log=q_to_rom(q), v_rom_log=v_to_rom(q, v), cmd_log=cmd, **meta)
         print(f"Saved {q.shape[1]} samples at {1.0 / self.log_dt:g} Hz to {out_dir}/ "
               f"({self.full_log_name}, {self.rom_log_name}).")

@@ -7,18 +7,17 @@
 
 import argparse
 import os
+from pathlib import Path
 import sys
 import time
 
 import numpy as np
-import matplotlib.pyplot as plt
 
 ROOT_DIR = os.getenv("ROBOT_SIM_ROOT_DIR",
                      os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT_DIR)
 sys.path.insert(0, os.path.join(ROOT_DIR, "data"))
 from utils.math_utils import body_to_world
-from plot_23dof_data import state_labels, plot_data, playback_trajectories
 
 
 if __name__ == "__main__":
@@ -29,6 +28,9 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=int, default=1, help="GPU dataset number XX (default 1)")
     parser.add_argument("--num", type=int, default=3, help="trajectories to show (default 3)")
     parser.add_argument("--seed", type=int, default=None, help="selection seed (default: time)")
+    parser.add_argument("--save", nargs="?", const="", default=None, metavar="DIR",
+                        help="save position and velocity PNGs and exit; optional output directory "
+                             "(default: <dataset>_plots beside the NPZ file)")
     args = parser.parse_args()
     if args.run is None:
         data_path = os.path.join(ROOT_DIR, "data", "data", f"g1_29dof_jog_data_{args.dataset:02d}.npz")
@@ -36,8 +38,30 @@ if __name__ == "__main__":
         data_path = os.path.join(ROOT_DIR, "data", "data", args.run, "g1_29dof_jog_data.npz")
     xml_path = os.path.join(ROOT_DIR, "models", "g1_29dof", "g1_29dof.xml")
 
+    if not os.path.isfile(data_path):
+        log_dir = Path(ROOT_DIR) / "data" / "data"
+        runs = sorted(path.parent.name for path in log_dir.glob("*/g1_29dof_jog_data.npz"))
+        hint = ("Available saved runs: " + ", ".join(runs) + ".\n"
+                f"Plot one with: python data/plot_29dof_data.py {runs[0]}"
+                if runs else "Record a run with simulation_jog.py --log <name> first.")
+        parser.error(f"Jogging dataset not found: {data_path}\n{hint}")
+
+    # Select a non-interactive backend before either pyplot or the shared
+    # plotting helpers are imported. Saving never launches the GLFW viewer.
+    if args.save is not None:
+        import matplotlib
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from plot_23dof_data import state_labels, plot_data, playback_trajectories
+
+    save_dir = None
+    if args.save is not None:
+        save_dir = (Path(args.save).expanduser() if args.save else
+                    Path(data_path).with_name(Path(data_path).stem + "_plots"))
+        save_dir.mkdir(parents=True, exist_ok=True)
+
     # load the data
-    data = np.load(data_path)
+    data = np.load(data_path, allow_pickle=False)
     q, v, cmd = data["q_log"], data["v_log"], data["cmd_log"]   # (B,T,nq), (B,T,nv), (B,T,3)
     log_dt = float(data["log_dt"])
     B, T, nq = q.shape
@@ -58,13 +82,18 @@ if __name__ == "__main__":
     cmd_ang = body_to_world(q_sel[..., 3:7], np.concatenate([zero, zero, cmd_sel[..., 2:3]], axis=-1))
     v_overlays = {0: cmd_lin[..., 0], 1: cmd_lin[..., 1], 5: cmd_ang[..., 2]}
 
-    # static traces first (non-blocking), then the looping MuJoCo replay
+    # Save static traces, or show them alongside the looping MuJoCo replay.
     q_labels, v_labels = state_labels(xml_path)
-    plot_data(t, q_sel, q_labels, "positions, q")
-    plot_data(t, v_sel, v_labels, "velocities, v", overlays=v_overlays)
-    plt.ion()
-    plt.show(block=False)
-    plt.pause(0.1)
-    playback_trajectories(xml_path, q_sel, v_sel, log_dt, idx, loop=True)
-    plt.ioff()
-    plt.show()
+    plot_data(t, q_sel, q_labels, "positions, q",
+              save_path=save_dir / "positions.png" if save_dir is not None else None)
+    plot_data(t, v_sel, v_labels, "velocities, v", overlays=v_overlays,
+              save_path=save_dir / "velocities.png" if save_dir is not None else None)
+    if save_dir is not None:
+        plt.close("all")
+    else:
+        plt.ion()
+        plt.show(block=False)
+        plt.pause(0.1)
+        playback_trajectories(xml_path, q_sel, v_sel, log_dt, idx, loop=True)
+        plt.ioff()
+        plt.show()

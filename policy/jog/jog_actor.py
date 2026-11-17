@@ -31,7 +31,7 @@ def parse_meta(value):
 class JogActor:
     """obs (B, 98) torch -> actions (B, 29) torch on the same device, via onnxruntime."""
 
-    def __init__(self, onnx_path: str):
+    def __init__(self, onnx_path: str, *, intra_op_num_threads=None):
         model = onnx.load(onnx_path)
         self.meta = {p.key: parse_meta(p.value) for p in model.metadata_props}
         self.meta["motion_period_frames"] = self._period(self.meta)
@@ -44,6 +44,8 @@ class JogActor:
 
         opts = ort.SessionOptions()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        if intra_op_num_threads is not None:
+            opts.intra_op_num_threads = int(intra_op_num_threads)
         self.session = ort.InferenceSession(model.SerializeToString(), opts,
                                             providers=ort.get_available_providers())
         self.obs_name = self.session.get_inputs()[0].name
@@ -64,6 +66,10 @@ class JogActor:
     def reset(self, batch_size: int):
         self.state = {n: np.zeros([batch_size if d == "batch" else d for d in s], np.float32)
                       for n, s in self.state_shapes.items()}
+
+    def snapshot_state(self):
+        """Copy the ONNX recurrent inputs without advancing or resetting the actor."""
+        return {name: value.copy() for name, value in self.state.items()}
 
     def __call__(self, obs: torch.Tensor) -> torch.Tensor:
         feed = {self.obs_name: obs.detach().float().cpu().numpy(), **self.state}

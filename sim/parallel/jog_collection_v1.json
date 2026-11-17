@@ -1,0 +1,18 @@
+{
+  "collection_id": "jog_kcf_collection_v1",
+  "seed": 20261114,
+  "batch_size": 512,
+  "batches": 20,
+  "pilot_batch_size": 256,
+  "duration_s": 20.0,
+  "log_hz": 50,
+  "init_joint_noise": 0.01,
+  "init_yaw_range": 3.141592653589793,
+  "init_xy_range": 2.0,
+  "policy_threads": 4,
+  "minimum_free_gb": 15.0,
+  "pilot_maximum_failure_fraction": 0.15,
+  "maximum_failure_fraction": 0.20,
+  "minimum_directed_transition_count": 50,
+  "output_dir": "data/data/jog_kcf_collection_v1"
+}

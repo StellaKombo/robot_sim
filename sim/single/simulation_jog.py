@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from policy.jog.jog_actor import JogActor
 from policy.walk.config import G1Config
 from utils.math_utils import gravity_from_quat
+from utils.jog_logging import JogPolicyLog, jog_log_metadata
 from simulation_base import SimulationBase, SIM_DT, LOG_HZ
 
 # GLOBAL VARIABLES
@@ -73,6 +74,7 @@ class JogSimulation(SimulationBase):
                  headless: bool = False, log_name: str = None, log_hz: float = LOG_HZ):
         # policy and its deployment params (from the ONNX metadata)
         self.policy = JogActor(policy_path)
+        self.policy_path, self.xml_path = policy_path, xml_path
         self.policy_name = os.path.basename(policy_path)
         meta = self.policy.meta
         self.control_dt = 0.02
@@ -106,6 +108,8 @@ class JogSimulation(SimulationBase):
         self.phase_step = 0
         self.mode = 0
         self.log_mode = []
+        self.log_time = []
+        self.policy_log = JogPolicyLog(1, self.period, self.control_dt)
 
     # COMMAND
 
@@ -148,7 +152,15 @@ class JogSimulation(SimulationBase):
 
     def compute_action(self) -> np.ndarray:
         obs = torch.from_numpy(self.build_observation()).unsqueeze(0)
+        state_in = self.policy.snapshot_state() if self.log_name is not None else None
         action = self.policy(obs).squeeze(0).numpy()
+        if self.log_name is not None:
+            self.policy_log.record(
+                time=self.data.time, q=self.data.qpos[None], v=self.data.qvel[None],
+                previous_action=self.prev_action[None], command=self.cmd[None], mode=self.mode,
+                phase_step=self.phase_step, observation=obs, state_in=state_in,
+                action=action[None], state_out=self.policy.state,
+            )
         self.phase_step = (self.phase_step + 1) % self.period   # free-running, as in deploy
         return action
 
@@ -157,11 +169,23 @@ class JogSimulation(SimulationBase):
     def _record(self):
         super()._record()
         self.log_mode.append(self.mode)
+        self.log_time.append(self.data.time)
 
     def log_extras(self) -> dict:
         return dict(mode_log=np.asarray(self.log_mode, dtype=np.int8)[None],
+                    time_log=np.asarray(self.log_time, dtype=np.float64)[None],
                     mode_names=np.array(MODE_NAMES), policy=self.policy_name,
                     fell=np.array([bool(np.min(np.stack(self.log_q)[:, 2]) < 0.45)]))
+
+    def full_log_extras(self) -> dict:
+        self.policy_log.finish(
+            time=self.data.time, q=self.data.qpos[None], v=self.data.qvel[None],
+            previous_action=self.prev_action[None], phase_step=self.phase_step,
+            state=self.policy.state, control_aligned=self.n_steps % self.decimation == 0,
+        )
+        return dict(**self.policy_log.arrays(),
+                    **jog_log_metadata(self.policy, self.policy_path, self.xml_path, self.control_dt),
+                    command_source=np.array("raw_twist" if self.raw_cmd else "shaped_stick"))
 
 
 ############################################################################

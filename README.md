@@ -1,6 +1,12 @@
 # robot_sim
 Forward simulation of humanoid robot under a trained RL policies.
 
+The active workflow in this checkout is the **29-DoF jogging simulator**. The
+previous walking checkout, including its datasets and KCF checkpoints, is kept
+beside this directory at `../robot_sim_walk/`. When running that archived
+checkout, set `ROBOT_SIM_ROOT_DIR` to its directory so an existing environment
+does not resolve imports or data paths against this jogging checkout.
+
 ## Overview
 - `models/` — MuJoCo XML and meshes, one folder per robot: `g1_23dof/` (walk policy) and `g1_29dof/` (jog policy).
 - `policy/` — one folder per policy: `walk/` (23-DoF walk checkpoint `g1_23dof_vel.pt`, robot config `G1Config`, and `walk_actor.py` used by both sims) and `jog/` (29-DoF jog ONNX policy and its onnxruntime loader `jog_actor.py`).
@@ -32,6 +38,10 @@ The environment is defined in [`environment.yml`](environment.yml). From the rep
 ```bash
 make install
 conda activate robot_sim
+```
+ALternatively run:
+```
+micromamba activate robot_sim
 ```
 This fetches the `KCF_MPC` submodule if it's missing, creates the `robot_sim` env, and sets `ROBOT_SIM_ROOT_DIR` to this
 repo, scoped to the env. To move `KCF_MPC` to the latest commit on its `main`, run
@@ -137,6 +147,60 @@ python sim/single/simulation_walk.py --log lissajous --log_hz 200   # logged at 
   each stride, and it keeps your orbit and zoom.
 - Timing affects the result, so two runs never match exactly.
 
+#### Jogging policy logs for KCF training
+
+Both `simulation_jog.py --log <name>` and `parallel_sim_jog.py` save additional
+control-rate arrays in the **full-order** `g1_29dof_jog_data*.npz` file. These
+records are sampled at every 50 Hz policy query, independently of `--log_hz`.
+The existing `q_log`, `v_log`, `cmd_log`, and `mode_log` retain their original
+physics/logging-rate meaning. `time_log` timestamps those physics samples.
+
+For `B` robots and `K` policy queries, the new fields are:
+
+| Field | Shape | Meaning |
+|---|---|---|
+| `policy_time_log` | `(B, K)` | Actual pre-query simulation time |
+| `policy_q_log`, `policy_v_log` | `(B, K, 36)`, `(B, K, 35)` | Pre-query robot configuration and velocity |
+| `policy_prev_action_log` | `(B, K, 29)` | Action used in this query's observation |
+| `policy_cmd_log`, `policy_mode_log` | `(B, K, 3)`, `(B, K)` | Applied twist after clipping/shaping, and its mode |
+| `policy_phase_step_log` | `(B, K)` | Actual free-running clock index, including any random initial offset |
+| `policy_clock_log` | `(B, K, 2)` | Ungated clock sine/cosine, retained while standing |
+| `policy_gait_phase_log` | `(B, K, 2)` | Phase passed to the policy; exactly zero while standing |
+| `policy_obs_log` | `(B, K, 98)` | Exact observation passed to ONNX inference |
+| `policy_action_log` | `(B, K, 29)` | Output of this query, held during the following control interval |
+| `policy_h_in_log`, `policy_c_in_log` | `(B, K, layers, hidden)` | LSTM memory immediately before inference |
+| `policy_h_out_log`, `policy_c_out_log` | `(B, K, layers, hidden)` | LSTM memory returned by that inference |
+
+The current LSTM has one layer and 128 hidden and cell channels each. MLP
+policies omit recurrent arrays. Query `k` uses `policy_cmd_log[:, k]` to drive
+the transition from `policy_q_log[:, k]` / `policy_v_log[:, k]` to the next
+query's state. Use these command records for training alignment; the legacy
+physics-rate `cmd_log` is sampled after physics and can describe the incoming
+command at a control boundary.
+
+`terminal_time`, `terminal_q`, `terminal_v`, `terminal_prev_action`,
+`terminal_phase_step`, `terminal_clock`, and `terminal_h_in` / `terminal_c_in`
+retain the final state after physics. Use it as the final 20 ms transition
+target only when `terminal_control_aligned` is true. A stop in the middle of a
+control interval is retained and explicitly marked false. A rollout with no
+policy queries has terminal fields only and supplies no training transitions.
+
+The full-order archive also includes `policy_log_schema` (`g1_jog_policy_v1`),
+`policy_log_convention`, `policy_kind`, `policy_state_names`, policy/model SHA-256
+hashes, joint names, and the gait period from ONNX metadata. Parallel logs add
+the collection configuration in `generation_metadata`; single logs identify
+`command_source` as `raw_twist` or `shaped_stick`. Large policy arrays are saved
+once in the full-order file; ROM files keep their plotting data and timestamps.
+Load all fields with `np.load(path, allow_pickle=False)`.
+
+Install the dependencies in `environment.yml` and `pytest`, then check the
+logger with `python -m pytest tests/test_jog_logging.py -q`. The tests use the
+actual ONNX policy and CPU MuJoCo to check exact policy replay, zero-command
+masking, free-running clocks, resets, batch memory ordering, partial intervals,
+and physics logging rates from 25 to 500 Hz. The parallel-loop tests substitute
+CPU MuJoCo for the GPU stepper; an actual MuJoCo Warp GPU smoke run still
+requires CUDA.
+
 ### Generate datasets (GPU)
 Runs batched MuJoCo Warp rollouts and writes both the full-order state and the
 reduced-order state for each rollout into `./data/data/`. Requires a CUDA GPU.
@@ -151,6 +215,111 @@ rollout size and command randomization. Each iteration produces two files:
 - `g1_rom_data_XX.npz`   — reduced order: `q_rom_log` `[px, py, theta]`,
   `v_rom_log` `[vx, vy, wz]` (body frame), `cmd_log`.
 
+### Full jogging KCF collection
+
+`sim/parallel/jog_collection_v1.json` defines a reproducible collection of 10,240
+20-second episodes at 50 Hz. Run it on GPU 0 with:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/collect_jog_dataset.py
+```
+
+The runner first checks a separate 256-episode pilot, then collects 20 batches
+of 512 episodes. The eight profile families cover standing, sustained motion,
+speed ramps within the trained bands, curves, pivots, settled starts/stops,
+short stops with early restarts, and directed transitions between all seven
+command behaviors (standing; forward/backward straight motion; left/right
+curves; left/right pivots). Moving episodes finish with at least three seconds
+of zero command. Commands retain the deployed controller's discontinuities;
+neither the LSTM nor its clock is reset when a command changes.
+
+Initial joint positions vary by up to 0.01 rad, and world origins/yaws vary
+without changing the robot's body-frame task. Initial clock indices include
+deployment-like zero-phase starts and all 43 gait phases. Physics, policy weights,
+PD gains, and trained twist bands are the same as the simulator.
+
+Compressed full-order archives, per-batch checksums/audits, and progress manifests
+are under `data/data/jog_kcf_collection_v1/`. Use the `full/` directory as the
+raw training source; `pilot/` is a separate collection check. Raw positions and
+base linear velocities remain in world coordinates, with wxyz orientations and
+body angular velocities. The KCF processing pipeline on `integrated-pose-runtime`
+owns whole-trajectory splitting and the fixed ground/yaw frame convention in
+`utils/relative_frame.py`. The collector assigns stable trajectory IDs and profile
+labels, and records the frame helper's hash, without assigning dataset splits.
+That branch's `data.py` / `process.py` pipeline assembles the 359-feature jogging
+state from the 29-joint layout, recorded LSTM hidden/cell memory, previous
+actions, and ungated gait clock. The selected 100-step jogging checkpoint and
+its validation/test plots are published in
+`KCF_MPC/results/g1_29dof_h100_v1/`; the checkpoint uses Git LFS.
+
+Every batch checks exact command/state alignment, phase continuity, LSTM memory
+continuity, sampled ONNX replay, and relative-frame round trips. Raw failures are
+retained. `valid_transition_mask` marks the valid prefix before the existing
+0.5 m height / 0.8 rad tilt envelope is crossed, and `first_invalid_transition`
+identifies the boundary. The final audit requires all profiles, starts, stops,
+early restarts, long zero holds, gait phases, and at least 50 valid examples of
+each of the 42 directed behavior transitions. These are collection checks;
+held-out KCF accuracy still needs to be established during model training.
+
+Re-running the command resumes completed batches after checksum verification.
+It rejects changed settings or collection code rather than mixing incompatible
+recordings. Collection status is in `run_status.json`, with detailed totals in
+`full/manifest.json`. No training process is launched by this collector.
+Use `python scripts/jog_collection_status.py` to inspect progress without
+initializing CUDA or reading the large raw arrays.
+After completion, `python scripts/report_jog_collection.py` writes a coverage
+figure, command-versus-measured motion examples for all eight profiles, and a
+JSON summary under `data/data/jog_kcf_collection_v1/reports/`. That directory
+also contains `array_schema.json`, listing each saved field's shape and dtype.
+
+### Smooth paths for jogging KCF/MPC
+
+The separate smooth-input supplement adds 1,536 one-minute episodes at 50 Hz,
+after a 96-episode pilot. Its seven profiles are figure-eights (25%), circles
+and ovals (15%), sinusoidal slaloms (15%), independent speed/yaw multisine (15%),
+quintic interpolation between speed/yaw targets (15%), smooth pivot-rate changes
+(5%), and smooth driving segments interleaved with stops/restarts (10%).
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/collect_smooth_jog_dataset.py --phase pilot
+python scripts/report_smooth_jog_collection.py --phase pilot
+CUDA_VISIBLE_DEVICES=0 python scripts/collect_smooth_jog_dataset.py --phase full
+python scripts/report_smooth_jog_collection.py
+```
+
+`sim/parallel/jog_smooth_collection_v1.json` defines the size and seed. Data,
+checksums, manifests, and plots are under `data/data/jog_kcf_smooth_collection_v1/`.
+Inspect progress with `python scripts/jog_collection_status.py --directory
+data/data/jog_kcf_smooth_collection_v1`. The collector reuses the same physics,
+policy, logging, validity envelope, and relative-frame helper as the first
+collection. It gives the supplement a distinct collection ID and episode-ID
+range. Whole-trajectory splitting remains in KCF processing.
+
+Both forward and backward path traversals are included. Figure-eights and ovals
+use arc-length parameterization and select spatial scale/traversal period to
+respect the policy's speed and turn-rate bands. Every periodic-path episode
+commands at least one full reference cycle. Within driving modes both speed and yaw rate
+vary smoothly, including small turn rates near zero. Startup/shutdown keep the
+deployed mode switch: driving commands jump between zero and the supported
+speed band, and pivots stay within their separate yaw-rate band.
+
+`command_integrated_reference_log` is an ideal unicycle path in the initial
+ground/yaw frame. It is a reference derived from the input sequence; the robot
+is simulated freely and its actual motion is logged independently. Per-episode
+parameters, core-cycle indices, nominal loop closure, and measured loop closure
+are saved. Quality checks require complete valid reference cycles, smooth
+variation in both command channels, and the original controller-state checks.
+For periodic paths, the variant suffix identifies the signed path
+parameterization. Randomized arc offsets determine the initial turn; read its
+actual sign from `policy_cmd_log` rather than inferring it from the suffix.
+
+The report writes `smooth_paths.png` (reference versus measured paths),
+`smooth_commands.png` (commands versus measured velocities), checksum results,
+and actual loop-error statistics. After full completion it also creates
+`combined_corpus.json`, referencing the two full raw collections and excluding
+pilots. Use that combined corpus when adding the 29-joint/LSTM KCF adapter;
+the smooth and step/hold recordings complement each other.
+
 ### Visualize datasets
 Each script takes an optional run name. With one, it plots the run that a sim's `--log <name>`
 saved in `data/data/<name>/`. Without one, they plot GPU dataset `_01`. Edit the `num_trajectories` or
@@ -164,6 +333,21 @@ python data/plot_23dof_data.py lissajous  # the run saved with --log lissajous
 python data/plot_29dof_data.py            # jog GPU dataset _01 (--dataset N for another)
 python data/plot_29dof_data.py myjog      # a simulation_jog.py run saved with --log myjog
 ```
+
+For a terminal without a desktop display, save the jogging position and velocity
+plots as PNG images with `python data/plot_29dof_data.py --save`. This writes
+`positions.png` and `velocities.png` beside the dataset in a `<dataset>_plots/`
+directory and exits. Use `--save <directory>` to choose another destination.
+
+To inspect the actual robot motion without an X11 viewer, run
+`python sim/single/preview_jog.py --gpu 0`. This uses the single-robot MuJoCo
+simulation and ONNX policy, with EGL rendering on GPU 0 and `ffmpeg` encoding.
+It writes six MP4 demonstrations and a combined `all_motions.mp4` under
+`data/data/policy_preview/`, with commanded/measured velocity overlays and JSON
+summaries. The cases cover standing, forward speed changes, backward motion,
+curves, pivots, and stopping/restarting. Each case begins from a fresh simulation;
+the policy memory and clock persist across command changes within that case.
+Use `--preset stop_restart` (or another case name) to render one demonstration.
 
 Reduced-order — Matplotlib plots of `q_rom` / `v_rom` (with body-frame cmd
 overlay) plus a looping 2D top-down animation with heading triangles:

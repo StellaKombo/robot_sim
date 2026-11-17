@@ -12,7 +12,8 @@ import math
 import os
 import sys
 import time
-from dataclasses import dataclass, field
+import json
+from dataclasses import asdict, dataclass
 
 # torch, mujoco, warp imports
 import numpy as np
@@ -27,6 +28,8 @@ ROOT_DIR = os.getenv("ROBOT_SIM_ROOT_DIR",
 sys.path.insert(0, ROOT_DIR)
 from policy.jog.jog_actor import JogActor
 from utils.math_utils import get_gravity_orientation_batch, q_to_rom, v_to_rom
+from utils.jog_logging import JogPolicyLog, jog_log_metadata
+from utils.jog_commands import validate_commands
 
 
 # command modes; the policy's trained twists are disjoint per mode, not a box
@@ -55,6 +58,9 @@ class JogSimConfig:
     cmd_zoh_steps: int = 125                   # control queries per command hold (125 = 2.5 s)
     random_phase: bool = True                  # random gait-clock offset per env (training starts mid-clip)
     init_joint_noise: float = 0.0              # [rad] uniform +- noise on the initial joint pose
+    init_yaw_range: float = 0.0                # [rad] uniform +- world yaw, joint pose preserved
+    init_xy_range: float = 0.0                 # [m] uniform +- world x/y origin
+    policy_threads: int = None                 # None preserves ONNX runtime defaults
     fall_height: float = 0.45                  # [m] pelvis height below which an env is flagged fallen
 
     # mode mix, order: stand, forward, backward, pivot
@@ -85,7 +91,7 @@ class ParallelJogSim:
         print(f"Random seed: {config.seed}")
 
         # policy and its deployment params (from the ONNX metadata)
-        self.policy = JogActor(config.policy_path)
+        self.policy = JogActor(config.policy_path, intra_op_num_threads=config.policy_threads)
         self.policy_name = os.path.basename(config.policy_path)
         meta = self.policy.meta
         f32 = dict(dtype=torch.float32, device=self.device)
@@ -223,13 +229,21 @@ class ParallelJogSim:
         """Standing pose, plus optional uniform joint noise; zero velocity."""
         B = self.batch_size
         q0 = torch.tensor(self.default_q, device=self.device).unsqueeze(0).repeat(B, 1)
+        if self.cfg.init_yaw_range:
+            yaw = self._uniform(-self.cfg.init_yaw_range, self.cfg.init_yaw_range, B)
+            q0[:, 3] = torch.cos(.5*yaw)
+            q0[:, 4:6] = 0.
+            q0[:, 6] = torch.sin(.5*yaw)
+        if self.cfg.init_xy_range:
+            q0[:, :2] += self._uniform(-self.cfg.init_xy_range, self.cfg.init_xy_range, B*2).view(B, 2)
         if self.cfg.init_joint_noise > 0:
             n = self.cfg.init_joint_noise
             q0[:, 7:7 + self.nu] += self._uniform(-n, n, B * self.nu).view(B, self.nu)
         v0 = torch.zeros(B, self.nv, device=self.device)
         return q0, v0
 
-    def rollout(self, T: int, fixed_cmd=None):
+    def rollout(self, T: int, fixed_cmd=None, *, command_schedule=None, initial_phase=None,
+                progress_callback=None):
         """Run one batch for T logged samples (incl. the initial state).
 
         fixed_cmd: optional (3,) twist held for every env after the stand (for checks).
@@ -237,6 +251,20 @@ class ParallelJogSim:
         fell (B,) bool and fall_time (B,) [s] (NaN if it never fell).
         """
         B, S = self.batch_size, (T - 1) * self.log_decimation
+        queries = (S + self.decimation - 1) // self.decimation
+        schedule = None
+        if command_schedule is not None:
+            if fixed_cmd is not None:
+                raise ValueError("fixed_cmd and command_schedule are mutually exclusive")
+            validate_commands(command_schedule)
+            if command_schedule.shape != (B, queries, 3):
+                raise ValueError(f"Expected command schedule {(B, queries, 3)}")
+            schedule = torch.as_tensor(command_schedule, dtype=torch.float32, device=self.device)
+        if initial_phase is not None:
+            initial_phase = np.asarray(initial_phase)
+            if (initial_phase.shape != (B,) or not np.issubdtype(initial_phase.dtype, np.integer)
+                    or np.any(initial_phase < 0) or np.any(initial_phase >= self.period)):
+                raise ValueError("initial_phase must contain one valid integer clock index per robot")
         q0, v0 = self.sample_initial_conditions()
 
         mjwarp.reset_data(self.wp_model, self.wp_data)
@@ -254,10 +282,13 @@ class ParallelJogSim:
 
         self._stand_cmd()
         self.policy.reset(B)
+        self.policy_log = JogPolicyLog(B, self.period, self.control_dt)
         if self.cfg.random_phase:
             phase_step = torch.randint(0, self.period, (B,), device=self.device, generator=self.rng)
         else:
             phase_step = torch.zeros(B, dtype=torch.long, device=self.device)
+        if initial_phase is not None:
+            phase_step = torch.as_tensor(initial_phase, dtype=torch.long, device=self.device).clone()
 
         def log(k):
             q_log[:, k] = self.t_qpos.to(self.log_dtype)
@@ -273,7 +304,12 @@ class ParallelJogSim:
                 if step % self.decimation == 0:
                     # first command after the stand, then a new one every cmd_zoh_steps
                     q = ctrl_query - self.stand_queries
-                    if q >= 0 and q % self.cfg.cmd_zoh_steps == 0:
+                    if schedule is not None:
+                        self.cmd = schedule[:, ctrl_query].contiguous()
+                        vx, wz = self.cmd[:, 0], self.cmd[:, 2]
+                        self.mode = torch.where(vx > 0, 1, torch.where(vx < 0, 2,
+                                        torch.where(wz != 0, 3, 0))).long()
+                    elif q >= 0 and q % self.cfg.cmd_zoh_steps == 0:
                         if fixed_cmd is None:
                             self._sample_cmd()
                         else:
@@ -283,7 +319,15 @@ class ParallelJogSim:
                                             MODE_BWD if fixed_cmd[0] < 0 else
                                             MODE_PIVOT if fixed_cmd[2] != 0 else MODE_STAND)
                     obs = self.build_observation(action, phase_step)
+                    state_in = self.policy.snapshot_state()
+                    previous_action = action
                     action = self.policy(obs)
+                    self.policy_log.record(
+                        time=step * self.sim_dt, q=self.t_qpos, v=self.t_qvel,
+                        previous_action=previous_action, command=self.cmd, mode=self.mode,
+                        phase_step=phase_step, observation=obs, state_in=state_in,
+                        action=action, state_out=self.policy.state,
+                    )
                     phase_step = (phase_step + 1) % self.period   # free-running, as in deploy
                     ctrl_query += 1
 
@@ -295,8 +339,21 @@ class ParallelJogSim:
                     down = (self.t_qpos[:, 2] < self.cfg.fall_height) & ~fell
                     fall_time[down] = (step + 1) * self.sim_dt
                     fell |= down
+                if progress_callback is not None and (step+1) % (50*self.decimation) == 0:
+                    progress_callback((step+1)*self.sim_dt)
 
+        self.policy_log.finish(
+            time=S * self.sim_dt, q=self.t_qpos, v=self.t_qvel,
+            previous_action=action, phase_step=phase_step, state=self.policy.state,
+            control_aligned=S % self.decimation == 0,
+        )
         return q_log, v_log, cmd_log, mode_log, fell, fall_time
+
+    def full_log_extras(self):
+        return dict(**self.policy_log.arrays(),
+                    **jog_log_metadata(self.policy, self.cfg.policy_path,
+                                       self.cfg.xml_path, self.control_dt),
+                    generation_metadata=np.array(json.dumps(asdict(self.cfg), default=str, sort_keys=True)))
 
 
 ############################################################################
@@ -350,12 +407,13 @@ if __name__ == "__main__":
 
         q_np, v_np = q_log.cpu().numpy(), v_log.cpu().numpy()
         common = dict(sim_dt=float(r.sim_dt), control_dt=float(r.control_dt), log_dt=float(r.log_dt),
+                      time_log=np.broadcast_to(np.arange(T, dtype=np.float64) * r.log_dt, (batch_size, T)),
                       cmd_log=cmd_log.cpu().numpy(), mode_log=mode_log.cpu().numpy(),
                       mode_names=np.array(MODE_NAMES), fell=fell.cpu().numpy(),
                       fall_time=fall_time.cpu().numpy(), policy=r.policy_name, model=model_file)
         save_path = f"{save_dir}/{env_name}_data_{i+1:02d}.npz"
         rom_save_path = f"{save_dir}/{rom_env_name}_data_{i+1:02d}.npz"
-        np.savez(save_path, q_log=q_np, v_log=v_np, **common)
+        np.savez(save_path, q_log=q_np, v_log=v_np, **common, **r.full_log_extras())
         np.savez(rom_save_path, q_rom_log=q_to_rom(q_np), v_rom_log=v_to_rom(q_np, v_np), **common)
         print(f"  q_log {q_np.shape}, v_log {v_np.shape}")
         print(f"  Saved full-order to: {save_path}")
