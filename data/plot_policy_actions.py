@@ -22,7 +22,7 @@ for directory in (ROOT, Path(__file__).resolve().parent):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 from compare_rom_data import COLORS, load_rom_run, warn_if_unmatched
-from policy.config import G1Config
+from policy.config import G1Config, JogConfig
 
 
 @dataclass(frozen=True)
@@ -38,26 +38,30 @@ class PolicyRun:
     configuration_verified: bool
 
 
-def joint_names():
+def joint_names(width=23):
     """Use the actual qpos joint order, not alphabetical or actuator order."""
-    body = ET.parse(ROOT / "models/g1_23dof.xml").getroot().find("worldbody")
+    xml = 'models/g1_29dof/g1_29dof.xml' if width == 29 else 'models/g1_23dof.xml'
+    body = ET.parse(ROOT / xml).getroot().find("worldbody")
     return [joint.attrib["name"].removesuffix("_joint") for joint in body.iter("joint")
             if joint.get("type", "hinge") not in {"free", "ball"}]
 
 
-def verify_configuration(directory):
+def verify_configuration(directory, *, jogging=False):
     """Only reconstruct historical target angles with the matching policy config."""
     path = directory / "pair_plan.json"
     hashes = json.loads(path.read_text()).get("source_hashes", {}) if path.is_file() else {}
     verified = True
-    for name in ("policy/config.py", "models/g1_23dof.xml"):
+    required = (('policy/config.py', 'models/g1_29dof/g1_29dof.xml',
+                 'policy/jog/g1_29dof_jog_lstm_v0_cont.onnx') if jogging
+                else ('policy/config.py', 'models/g1_23dof.xml'))
+    for name in required:
         recorded = hashes.get(name)
         if recorded is None:
             verified = False
         elif hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != recorded:
             raise ValueError(f"{directory}: {name} differs from the recording; historical joint target reconstruction is unsafe")
     if not verified:
-        warnings.warn(f"{directory.name}: no complete configuration hashes; joint targets use current G1Config (unverified historical scaling)",
+        warnings.warn(f"{directory.name}: no complete configuration hashes; joint targets use the current policy config (unverified historical scaling)",
                       stacklevel=2)
     return verified
 
@@ -66,9 +70,11 @@ def load_policy_run(directory, *, label=None):
     directory = Path(directory).expanduser()
     if not directory.is_dir():
         directory = ROOT / "data/data" / directory
-    verified = verify_configuration(directory)
-    cfg = G1Config()
-    with np.load(directory / "g1_23dof_data.npz", allow_pickle=False) as data:
+    jogging = (directory / 'g1_29dof_jog_data.npz').is_file()
+    verified = verify_configuration(directory, jogging=jogging)
+    cfg = JogConfig() if jogging else G1Config()
+    full_name = 'g1_29dof_jog_data.npz' if jogging else 'g1_23dof_data.npz'
+    with np.load(directory / full_name, allow_pickle=False) as data:
         q = np.asarray(data["q_log"], dtype=float)
         dt = float(data["control_dt"])
         log_dt = float(data["log_dt"] if "log_dt" in data else data["sim_dt"])
@@ -80,7 +86,7 @@ def load_policy_run(directory, *, label=None):
     if (stamps.ndim != 1 or len(stamps) < 3 or previous.shape != (len(stamps), width)
             or commands.shape != (len(stamps), 3) or q.ndim != 3
             or q.shape[0] != 1 or q.shape[2] != 7 + width or q.shape[1] < 2):
-        raise ValueError("Expected single-environment full state and matching (T,23) policy actions / (T,3) commands")
+        raise ValueError(f"Expected single-environment full state and matching (T,{width}) policy actions / (T,3) commands")
     if (not np.isfinite([dt, log_dt]).all() or min(dt, log_dt) <= 0
             or not all(np.isfinite(x).all() for x in (stamps, previous, commands, q))
             or not np.allclose(np.diff(stamps), dt, rtol=1e-6, atol=1e-8)):
@@ -141,7 +147,9 @@ def plot_policy_comparison(runs, indices, *, start=10., end=None, zoom=6., cutof
     """Short time traces plus full-window spectra and all-joint variation summary."""
     if len(runs) != 2 or not 1 <= len(indices) <= 6 or len(set(indices)) != len(indices):
         raise ValueError("Select two runs and one to six distinct joints")
-    names = joint_names()
+    if runs[0].actions.shape[1] != runs[1].actions.shape[1]:
+        raise ValueError('Policy comparisons require the same robot joint layout')
+    names = joint_names(runs[0].actions.shape[1])
     if any(i < 0 or i >= len(names) for i in indices):
         raise ValueError("Joint indices must be in [0,22]")
     if not np.isfinite(zoom) or zoom <= 0:
@@ -227,7 +235,7 @@ def plot_policy_comparison(runs, indices, *, start=10., end=None, zoom=6., cutof
     bars[0].legend(fontsize=8)
     for ax in bars:
         ax.grid(True, axis="x", alpha=.25)
-    summary.suptitle(f"All 23 joints, {start:g}–{end:g} s — variation includes intended gait; not a noise verdict")
+    summary.suptitle(f"All {len(names)} joints, {start:g}–{end:g} s — variation includes intended gait; not a noise verdict")
     return {"policy_time_traces": traces, "policy_spectra": spectra, "policy_joint_summary": summary}, metrics
 
 

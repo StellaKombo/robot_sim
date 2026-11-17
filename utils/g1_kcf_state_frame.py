@@ -1,4 +1,4 @@
-"""Fixed ground/yaw frame for the native 85-state G1 schema."""
+"""Fixed ground/yaw frame for the 85- and 359-channel G1 schemas."""
 
 from dataclasses import dataclass
 import numpy as np
@@ -27,8 +27,11 @@ class G1KCFSinCosFrame:
 
     frame: RelativeFrame
     yaw_origin_world: float | None = None
+    state_dim: int = G1_SINCOS_STATE_DIM
 
     def __post_init__(self):
+        if self.state_dim not in (85, 359):
+            raise ValueError("Unsupported G1 state dimension")
         if (
             abs(float(self.frame.origin_world[2])) > 1e-5
             or np.max(np.abs(self.frame.orientation_world[1:3])) > 1e-5
@@ -53,9 +56,10 @@ class G1KCFSinCosFrame:
 
     @classmethod
     def from_state(cls, anchor_state_world, *, heading_world=None):
-        anchor = _values(anchor_state_world, "anchor_state_world", G1_SINCOS_STATE_DIM)
-        if anchor.shape != (G1_SINCOS_STATE_DIM,):
-            raise ValueError("anchor_state_world must have shape (85,)")
+        anchor = np.asarray(anchor_state_world)
+        if anchor.shape not in ((85,), (359,)):
+            raise ValueError("anchor_state_world must have shape (85,) or (359,)")
+        anchor = _values(anchor, "anchor_state_world", anchor.size)
         if not np.isclose(np.linalg.norm(anchor[2:4]), 1.0, atol=1e-5):
             raise ValueError("heading sine/cosine must have unit norm")
         half_yaw = 0.5 * np.arctan2(anchor[2], anchor[3])
@@ -64,7 +68,7 @@ class G1KCFSinCosFrame:
             [np.cos(half_yaw), 0.0, 0.0, np.sin(half_yaw)],
             yaw_only=True,
         )
-        return cls(frame, heading_world)
+        return cls(frame, heading_world, anchor.size)
 
     def _pose(self, pose, *, inverse=False):
         pose = _values(pose, "pose", 4)
@@ -88,11 +92,11 @@ class G1KCFSinCosFrame:
         return self._pose(pose_world)
 
     def state_to_local(self, state_world):
-        result = _values(state_world, "state_world", G1_SINCOS_STATE_DIM).copy()
+        result = _values(state_world, "state_world", self.state_dim).copy()
         result[..., :4] = self.pose_to_local(result[..., :4])
         return result
 
     def state_to_world(self, state_local):
-        result = _values(state_local, "state_local", G1_SINCOS_STATE_DIM).copy()
+        result = _values(state_local, "state_local", self.state_dim).copy()
         result[..., :4] = self._pose(result[..., :4], inverse=True)
         return result

@@ -26,13 +26,15 @@ ROOT_DIR = os.getenv("ROBOT_SIM_ROOT_DIR",
                      os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, ROOT_DIR)
 from policy.actor import load_policy
-from policy.config import G1Config
+from policy.config import G1Config, get_robot_config, JOG_POLICY_PATH
+from policy.jog.jog_actor import JogActor
+from utils.jog_logging import JogPolicyLog, jog_log_metadata
 from utils.math_utils import gravity_from_quat, q_to_rom, v_to_rom
 from utils.zmq_utils import CMD_PORT, STATE_PORT, bind_pub, bind_sub, pack_state, unpack_twist
 
 # GLOBAL VARIABLES
-XML_PATH = os.path.join(ROOT_DIR, "models", "g1_23dof.xml")
-POLICY_PATH = os.path.join(ROOT_DIR, "policy", "g1_23dof_vel.pt")
+XML_PATH = os.path.join(ROOT_DIR, "models", "g1_29dof", "g1_29dof.xml")
+POLICY_PATH = str(JOG_POLICY_PATH)
 SIM_DT = 0.002      # [s] physics timestep
 LOG_HZ = 100.0      # [Hz] default logging rate; must divide the sim rate exactly
 RENDER_HZ = 50.0    # [Hz] visual rendering frequency
@@ -144,8 +146,10 @@ class Simulation:
                  headless: bool = False, log_name: str = None, log_hz: float = LOG_HZ,
                  readonly_viewer: bool = False):
         # config and run options
-        self.cfg = robot_cfg or G1Config()
+        self.cfg = robot_cfg or get_robot_config()
         self.nu = len(self.cfg.Kp)
+        self.is_jog = self.nu == 29
+        self.xml_path, self.policy_path = xml_path, policy_path
         self.headless = headless
         # Qualification is watch-only: GUI actions must never mutate physics.
         # Normal interactive/manual simulation keeps its existing shared-data viewer.
@@ -155,6 +159,9 @@ class Simulation:
 
         # model and data
         self.model = load_model(xml_path)
+        if (self.model.nu != self.nu or self.model.nq != 7+self.nu
+                or self.model.nv != 6+self.nu):
+            raise ValueError('Robot configuration must match the XML joint/state dimensions')
         self.model.opt.timestep = sim_dt
         self.data = mujoco.MjData(self.model)
         
@@ -178,7 +185,20 @@ class Simulation:
 
         # policy
         self.device = torch.device("cpu")
-        self.policy = load_policy(policy_path, self.device)
+        self.policy = (JogActor(policy_path, intra_op_num_threads=4) if self.is_jog
+                       else load_policy(policy_path, self.device))
+        if self.is_jog:
+            joints = [self.model.joint(self.model.actuator_trnid[i, 0]) for i in range(self.nu)]
+            if ([joint.name for joint in joints] != list(self.policy.meta['joint_names'])
+                    or [int(joint.qposadr[0]) for joint in joints] != list(range(7, 36))
+                    or [int(joint.dofadr[0]) for joint in joints] != list(range(6, 35))):
+                raise ValueError('Jogging model joint/action order must match the ONNX policy')
+            self.motion_period = int(self.policy.meta['motion_period_frames'])
+            if self.motion_period != 43 or self.policy.state_shapes != {
+                    'h_in': [1, 'batch', 128], 'c_in': [1, 'batch', 128]}:
+                raise ValueError('Jogging checkpoint requires the recorded 43-query clock and 128-unit LSTM')
+            quat_adr = int(self.model.sensor('pelvis_imu_quat_sensor').adr[0])
+            self.quat_slice = slice(quat_adr, quat_adr + 4)
         self.cmd_scale = np.asarray(self.cfg.cmd_scale, dtype=np.float32)
         self.default_j = np.asarray(self.cfg.default_joint_pos, dtype=np.float32)
         self.reset()
@@ -199,6 +219,10 @@ class Simulation:
         self.action = self.prev_action.copy()
         self.n_steps = 0   # physics steps since reset, to pace logging
         self.log_q, self.log_v, self.log_cmd = [], [], []
+        if self.is_jog:
+            self.policy.reset(1)
+            self.phase_step = 0
+            self.policy_log = JogPolicyLog(1, self.motion_period, self.cfg.control_dt)
         
         # recompute kinematics and sensors for the new state
         mujoco.mj_forward(self.model, self.data)
@@ -207,7 +231,21 @@ class Simulation:
 
     def set_cmd(self, cmd: np.ndarray):
         """Body-frame [vx, vy, wz], clipped to the policy's training range."""
-        self.cmd = np.clip(np.asarray(cmd, dtype=np.float32), -self.cmd_scale, self.cmd_scale)
+        lower = np.array([-1., 0., -2.], dtype=np.float32) if self.is_jog else -self.cmd_scale
+        self.cmd = np.clip(np.asarray(cmd, dtype=np.float32), lower, self.cmd_scale)
+
+    def policy_feedback(self):
+        """Actual pre-query recurrent inputs and ungated clock, without policy inference."""
+        if not self.is_jog:
+            return {}
+        angle = 2.*np.pi*self.phase_step/self.motion_period
+        return dict(policy_clock=np.array([np.sin(angle), np.cos(angle)], dtype=np.float32),
+                    policy_h=self.policy.state['h_in'][0, 0].copy(),
+                    policy_c=self.policy.state['c_in'][0, 0].copy())
+
+    def state_message(self):
+        return pack_state(self.data.time, self.data.qpos, self.data.qvel,
+                          self.prev_action, **self.policy_feedback())
 
     # POLICY
 
@@ -221,6 +259,13 @@ class Simulation:
         gravity = gravity_from_quat(d.qpos[3:7].astype(np.float32))
         qpos_j = d.qpos[7:7 + self.nu].astype(np.float32)
         qvel_j = d.qvel[6:6 + self.nu].astype(np.float32)
+
+        if self.is_jog:
+            phase = self.policy_feedback()['policy_clock'] if self.cmd.any() else np.zeros(2, np.float32)
+            gravity = gravity_from_quat(d.sensordata[self.quat_slice].astype(np.float32))
+            obs = np.concatenate((omega, qpos_j-self.default_j, qvel_j,
+                                  self.prev_action, self.cmd, phase, gravity)).astype(np.float32)
+            return torch.from_numpy(obs).unsqueeze(0)
 
         # gait clock from sim time, zeroed below stand_cmd_threshold
         phase = (d.time % self.cfg.gait_period) / self.cfg.gait_period
@@ -244,7 +289,17 @@ class Simulation:
     def policy_step(self):
         """One policy query; the action is held until the next one."""
         # run the policy; the action also feeds the next observation
-        self.action = self.policy(self.build_observation()).squeeze(0).cpu().numpy().astype(np.float32)
+        observation = self.build_observation()
+        memory = self.policy.snapshot_state() if self.is_jog and self.log_name is not None else None
+        self.action = self.policy(observation).squeeze(0).cpu().numpy().astype(np.float32)
+        if self.is_jog:
+            if self.log_name is not None:
+                mode = 0 if not self.cmd.any() else 1 if self.cmd[0] > 0 else 2 if self.cmd[0] < 0 else 3
+                self.policy_log.record(time=self.data.time, q=self.data.qpos[None], v=self.data.qvel[None],
+                    previous_action=self.prev_action[None], command=self.cmd[None], mode=mode,
+                    phase_step=self.phase_step, observation=observation, state_in=memory,
+                    action=self.action[None], state_out=self.policy.state)
+            self.phase_step = (self.phase_step + 1) % self.motion_period
         self.prev_action = self.action
 
     # PHYSICS
@@ -303,8 +358,7 @@ class Simulation:
         
                     # policy tick: send the state, read the newest command, check timeout, run policy
                     if k % self.decimation == 0:
-                        state_pub.send(pack_state(self.data.time, self.data.qpos, self.data.qvel,
-                                                  self.prev_action))
+                        state_pub.send(self.state_message())
                         try:
                             cmd, self.ref = unpack_twist(cmd_sub.recv(zmq.NOBLOCK))
                             self.set_cmd(cmd)
@@ -469,7 +523,8 @@ class Simulation:
         # one folder per run under data/data/
         out_dir = os.path.join(ROOT_DIR, "data", "data", self.log_name)
         os.makedirs(out_dir, exist_ok=True)
-        full_path = os.path.join(out_dir, "g1_23dof_data.npz")
+        full_name = 'g1_29dof_jog_data.npz' if self.is_jog else 'g1_23dof_data.npz'
+        full_path = os.path.join(out_dir, full_name)
         rom_path = os.path.join(out_dir, "g1_rom_data.npz")
 
         # preserve the recording schema's (B, T, dim) batch dimension
@@ -480,10 +535,19 @@ class Simulation:
                     log_dt=float(self.log_dt))
 
         # full-order file, then reduced-order file
-        np.savez(full_path, q_log=q, v_log=v, cmd_log=cmd, **meta)
+        extras = {}
+        if self.is_jog:
+            self.policy_log.finish(time=self.data.time, q=self.data.qpos[None], v=self.data.qvel[None],
+                previous_action=self.prev_action[None], phase_step=self.phase_step,
+                state=self.policy.state, control_aligned=self.n_steps % self.decimation == 0)
+            extras = dict(**self.policy_log.arrays(),
+                **jog_log_metadata(self.policy, self.policy_path, self.xml_path, self.cfg.control_dt),
+                command_source=np.array('raw_twist'), policy=np.array(os.path.basename(self.policy_path)),
+                fell=np.array([bool(np.min(q[..., 2]) < .45)]))
+        np.savez(full_path, q_log=q, v_log=v, cmd_log=cmd, **meta, **extras)
         np.savez(rom_path, q_rom_log=q_to_rom(q), v_rom_log=v_to_rom(q, v), cmd_log=cmd, **meta)
         print(f"Saved {q.shape[1]} samples at {1.0 / self.log_dt:g} Hz to {out_dir}/ "
-              "(g1_23dof_data.npz, g1_rom_data.npz).")
+              f"({full_name}, g1_rom_data.npz).")
 
 
 ############################################################################
@@ -501,7 +565,7 @@ def main():
     args = parser.parse_args()
 
     # build the sim and run until the viewer closes or Ctrl+C
-    robot_cfg = G1Config()
+    robot_cfg = get_robot_config()
     sim = Simulation(XML_PATH, POLICY_PATH, SIM_DT, robot_cfg, log_name=args.log, log_hz=args.log_hz)
     try:
         sim.run()

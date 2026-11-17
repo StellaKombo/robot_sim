@@ -20,7 +20,7 @@ import zmq
 ROOT_DIR = os.getenv("ROBOT_SIM_ROOT_DIR",
                      os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, ROOT_DIR)
-from policy.config import G1Config
+from policy.config import G1Config, get_robot_config
 from utils.zmq_utils import CMD_PORT, STATE_PORT, connect_pub, connect_sub, pack_twist, unpack_state
 
 
@@ -35,6 +35,9 @@ class RobotState:
     q: np.ndarray      # (nq,) base position (3), base quaternion wxyz (4), joint positions
     v: np.ndarray      # (nv,) base linear vel, world frame (3), base angular vel, body frame (3), joint vels
     prev_action: np.ndarray   # (nu,) policy action from the previous 50 Hz tick, as in its next observation
+    policy_clock: np.ndarray | None = None
+    policy_h: np.ndarray | None = None
+    policy_c: np.ndarray | None = None
 
 
 def nominal_state(cfg: G1Config) -> RobotState:
@@ -42,7 +45,9 @@ def nominal_state(cfg: G1Config) -> RobotState:
     # position: default base pose then default joints; velocity and previous action: all zero
     q = np.concatenate([cfg.default_base_pos, cfg.default_joint_pos]).astype(np.float64)
     v = np.zeros(6 + len(cfg.default_joint_pos))
-    return RobotState(t=0.0, q=q, v=v, prev_action=np.zeros(len(cfg.default_joint_pos)))
+    memory = (dict(policy_clock=np.array([0., 1.]), policy_h=np.zeros(128), policy_c=np.zeros(128))
+              if len(cfg.default_joint_pos) == 29 else {})
+    return RobotState(t=0.0, q=q, v=v, prev_action=np.zeros(len(cfg.default_joint_pos)), **memory)
 
 
 ############################################################################
@@ -112,8 +117,10 @@ def run(cmd_source: CommandSource, cfg: G1Config):
                 state_sub.poll(timeout=max(1, round(period * 1000)), flags=zmq.POLLIN)
             # newest state from the sim, if a new one arrived
             try:
-                t, q, v, prev_action = unpack_state(state_sub.recv(zmq.NOBLOCK), 7 + nu, 6 + nu, nu)
-                state = RobotState(t=t, q=q, v=v, prev_action=prev_action)
+                t, q, v, prev_action, clock, hidden, cell = unpack_state(
+                    state_sub.recv(zmq.NOBLOCK), 7 + nu, 6 + nu, nu, with_policy_state=True)
+                state = RobotState(t=t, q=q, v=v, prev_action=prev_action,
+                                   policy_clock=clock, policy_h=hidden, policy_c=cell)
 
                 # zero the controller clock at the first state, and again if sim time jumps back (restart)
                 if not have_state or t < last_t:
@@ -152,7 +159,7 @@ def main(source_class: type, description: str):
     parser.parse_args()
 
     # build the source and publish until Ctrl+C
-    cfg = G1Config()
+    cfg = get_robot_config()
     cmd_source = source_class(cfg.cmd_scale)
     try:
         run(cmd_source, cfg)

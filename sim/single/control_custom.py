@@ -4,7 +4,7 @@
 
 import argparse
 from control_base import run
-from policy.config import G1Config
+from policy.config import get_robot_config
 from utils.kcf_controller import (
     KCFCommand,
     REFERENCE_MODES,
@@ -64,7 +64,7 @@ def parse_args(argv=None):
 
 def main():
     args = parse_args()
-    cfg = G1Config()
+    cfg = get_robot_config()
     source = CustomCommand(
         cfg.cmd_scale,
         reference_mode=args.reference_mode or ("lissajous" if args.lissajous else None),

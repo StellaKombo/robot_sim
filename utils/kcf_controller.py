@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from control_base import ROOT_DIR, CommandSource, RobotState, nominal_state
-from policy.config import G1Config
+from policy.config import get_robot_config
 from utils.g1_kcf_state import g1_closed_loop_state, g1_world_heading
 from utils.kcf_reference import PlanarReference
 
@@ -115,13 +115,13 @@ class KCFCommand(CommandSource):
         feedback_is_synchronous: bool = False,
     ):
         super().__init__(cmd_scale)
-        self.cfg = G1Config()
         self.cpu_affinity = _configure_cpu_affinity(settings.get("cpu_affinity"))
         threads = int(settings["num_threads"])
         if threads < 1:
             raise ValueError("MPC num_threads must be positive")
         torch.set_num_threads(threads)
         self.mpc = create_mpc_controller(settings)
+        self.cfg = get_robot_config(self.mpc.model.config.state_dim)
         self.backend_label = self.mpc.backend
         if self.mpc.backend == "jax":
             self.backend_label += f"/{self.mpc.jax_platform}"
@@ -139,15 +139,15 @@ class KCFCommand(CommandSource):
             self.mpc, "observation_dim", self.mpc.model.config.state_dim
         )
         if (
-            observation_dim != 85
-            or self.mpc.model.config.state_dim != 85
+            observation_dim not in (85, 359)
+            or self.mpc.model.config.state_dim != observation_dim
             or self.mpc.model.config.L_embed != 0
             or self.mpc.input_dim != 3
             or tuple(self.mpc.tracking_feature_indices.cpu().tolist())
             != expected_tracked_indices
         ):
             raise ValueError(
-                "G1 requires the native 85-state model " "with three commands"
+                "G1 requires a matching native state layout with three commands"
             )
         if np.any(self.mpc.lower_bounds < -self.cmd_scale) or np.any(
             self.mpc.upper_bounds > self.cmd_scale
@@ -378,7 +378,7 @@ class KCFCommand(CommandSource):
             prefix_controls.flags.writeable = False
         previous = np.array(self.previous_command, dtype=np.float32, copy=True)
         previous.flags.writeable = False
-        heading = self.theta_prev if observation.shape == (85,) else None
+        heading = self.theta_prev if observation.shape in ((85,), (359,)) else None
         return SolveRequest(
             self._generation,
             self._request_counter,

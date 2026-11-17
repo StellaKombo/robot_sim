@@ -37,18 +37,37 @@ def unpack_twist(buf: bytes):
     return a[:3].astype(np.float32), ref
 
 
-def pack_state(t: float, qpos, qvel, prev_action) -> bytes:
-    """Sim time, full qpos, full qvel, and the policy's previous action as raw float64s."""
-    return np.concatenate([[t], qpos, qvel, prev_action]).astype(np.float64).tobytes()
+def pack_state(t: float, qpos, qvel, prev_action, *, policy_clock=None, policy_h=None, policy_c=None) -> bytes:
+    """Raw float64 feedback; jogging appends its ungated clock and pre-query h/c.
+
+    The legacy walking packet is unchanged. Jogging receivers require all 258
+    recurrent channels and reject a legacy packet rather than filling with zeros.
+    """
+    fields = [[t], qpos, qvel, prev_action]
+    if any(value is not None for value in (policy_clock, policy_h, policy_c)):
+        if len(prev_action) != 29 or len(qpos) != 36 or len(qvel) != 35:
+            raise ValueError('Recurrent feedback requires the 29-DoF robot layout')
+        for name, value, size in (('clock', policy_clock, 2), ('h', policy_h, 128), ('c', policy_c, 128)):
+            value = np.asarray(value, dtype=np.float64)
+            if value.shape != (size,) or not np.isfinite(value).all():
+                raise ValueError(f'Missing or invalid jogging policy {name}')
+            fields.append(value)
+    return np.concatenate(fields).astype(np.float64).tobytes()
 
 
-def unpack_state(buf: bytes, nq: int, nv: int, nu: int):
-    """Inverse of `pack_state`: (t, qpos, qvel, prev_action)."""
+def unpack_state(buf: bytes, nq: int, nv: int, nu: int, *, with_policy_state=False):
+    """Inverse of pack_state; optionally return the three recurrent fields too."""
     # reject anything that doesn't match this robot's sizes
     a = np.frombuffer(buf, dtype=np.float64)
-    if a.size != 1 + nq + nv + nu:
-        raise ValueError(f"state message has {a.size} floats, expected {1 + nq + nv + nu}.")
-    return float(a[0]), a[1:1 + nq].copy(), a[1 + nq:1 + nq + nv].copy(), a[1 + nq + nv:].copy()
+    base = 1 + nq + nv + nu
+    extra = 258 if with_policy_state and nu == 29 else 0
+    if a.size != base + extra or not np.isfinite(a).all():
+        raise ValueError(f"state message has {a.size} floats, expected {base + extra} finite values.")
+    physical = (float(a[0]), a[1:1+nq].copy(), a[1+nq:1+nq+nv].copy(), a[1+nq+nv:base].copy())
+    if not with_policy_state:
+        return physical
+    return physical + ((a[base:base+2].copy(), a[base+2:base+130].copy(), a[base+130:].copy())
+                       if extra else (None, None, None))
 
 
 ############################################################################

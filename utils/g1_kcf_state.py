@@ -1,4 +1,4 @@
-"""Encode live MuJoCo feedback in the trained 85-state G1 KCF schema."""
+"""Encode live MuJoCo feedback in the trained walking/jogging KCF schemas."""
 
 from typing import Protocol
 import numpy as np
@@ -15,15 +15,19 @@ class G1State(Protocol):
 
 
 def g1_closed_loop_state(state: G1State, gait_period: float) -> np.ndarray:
-    """Build the native 85 channels, with position/heading in world coordinates.
+    """Build the native state, with position/heading in world coordinates.
 
     [px, py, sin(theta), cos(theta)] (4), [vx, vy, wz] (3), pz (1),
     gravity (3), joint q (23),
     [vz, wx, wy] (3), joint v (23), gait [sin, cos] (2), previous action (23).
-    MPC anchors the complete 85-state vector to one fixed rollout frame.
+    Jogging uses 29 joints, its actual ungated clock, and 128+128 LSTM inputs,
+    giving 359 channels. MPC anchors either complete vector to one rollout frame.
     """
     q = state.q.astype(np.float32)
     v = state.v.astype(np.float32)
+    joints = len(state.prev_action)
+    if joints not in (23, 29) or q.shape != (7+joints,) or v.shape != (6+joints,):
+        raise ValueError('Robot q/v/action sizes must match the 23- or 29-DoF schema')
     quat = q[3:7]
     planar_pose = q_to_rom(q).astype(np.float32, copy=False)
     pose = np.array(
@@ -47,6 +51,18 @@ def g1_closed_loop_state(state: G1State, gait_period: float) -> np.ndarray:
     gait = np.array(
         [np.sin(2 * np.pi * phase), np.cos(2 * np.pi * phase)], dtype=np.float32
     )
+    memory = []
+    if joints == 29:
+        for name, width in (('policy_clock', 2), ('policy_h', 128), ('policy_c', 128)):
+            value = np.asarray(getattr(state, name, None), dtype=np.float32)
+            if value.shape != (width,) or not np.isfinite(value).all():
+                raise ValueError(f'Jogging feedback requires actual finite {name} with {width} values')
+            if name == 'policy_clock':
+                if not np.isclose(np.linalg.norm(value), 1., atol=1e-5):
+                    raise ValueError('Jogging clock must be the ungated unit sine/cosine pair')
+                gait = value
+            else:
+                memory.append(value)
     return np.concatenate(
         [
             pose,
@@ -58,6 +74,7 @@ def g1_closed_loop_state(state: G1State, gait_period: float) -> np.ndarray:
             v[6:],
             gait,
             state.prev_action.astype(np.float32),
+            *memory,
         ]
     )
 

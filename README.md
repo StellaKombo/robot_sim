@@ -1,8 +1,19 @@
 # robot_sim
 
 Run and compare KCF-MPC and single-integrator MPC on a G1 humanoid in MuJoCo,
-using the same frozen RL locomotion policy. The selected model is the original
-epoch-1540 checkpoint; no fine-tuned candidate was accepted.
+using the same frozen RL locomotion policy. This `feature/icem-mpc-jogging`
+branch selects the 29-DoF recurrent jogging policy and the epoch-1350
+`g1_29dof_h100_v1` KCF checkpoint. The walking implementation remains on
+`feature/icem-mpc`.
+
+The jogging model predicts 359 channels, including the actual 128+128 LSTM
+memory and ungated 43-query gait clock, with a 512-dimensional lift. Live
+feedback includes that memory; no zero-filled substitute or policy replay is
+used. The simulator consumes raw `[vx, 0, wz]` commands without joystick
+remapping. Both KCF and SI retain the existing iCEM settings and cost gains.
+Their shared jogging command bounds are `[-1,0,-2]` to `[1.5,0,2]`.
+Training used 100-step windows; the MPC horizon remains **20** steps at 20 ms.
+Walking tracking/timing results do not qualify this different model or policy.
 
 This checkout is a simulation/testing handover, not a hardware driver or a
 hardware-qualified implementation. The active optimizer is GPU-resident iCEM;
@@ -100,7 +111,7 @@ recordings at one simulated second per wall-clock second:
 python data/compare_rom_data.py kcf_01 si_01
 python data/plot_policy_actions.py kcf_01 si_01 --start 0 --zoom 6
 python data/plot_rom_data.py kcf_01
-python data/plot_23dof_data.py kcf_01
+python data/plot_29dof_data.py kcf_01
 ```
 
 The comparison overlays measured pose trails and heading triangles, with static
