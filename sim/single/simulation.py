@@ -7,6 +7,7 @@
 # standard imports
 import argparse
 import contextlib
+import copy
 import math
 import os
 import sys
@@ -140,11 +141,16 @@ class Simulation:
     """
 
     def __init__(self, xml_path: str, policy_path: str, sim_dt: float, robot_cfg: G1Config = None,
-                 headless: bool = False, log_name: str = None, log_hz: float = LOG_HZ):
+                 headless: bool = False, log_name: str = None, log_hz: float = LOG_HZ,
+                 readonly_viewer: bool = False):
         # config and run options
         self.cfg = robot_cfg or G1Config()
         self.nu = len(self.cfg.Kp)
         self.headless = headless
+        # Qualification is watch-only: GUI actions must never mutate physics.
+        # Normal interactive/manual simulation keeps its existing shared-data viewer.
+        self.readonly_viewer = readonly_viewer
+        self._display_model = self._display_data = None
         self.log_name = log_name     # run name; the log goes to data/data/<log_name>/
 
         # model and data
@@ -343,24 +349,48 @@ class Simulation:
         if self.headless:
             yield None
             return
+        # Passive sync applies GUI actions and clears applied forces, even with
+        # state_only=True. A watch-only viewer therefore needs separate model/data.
+        initial_state = None
+        if self.readonly_viewer:
+            state_spec = mujoco.mjtState.mjSTATE_INTEGRATION
+            initial_state = np.empty(mujoco.mj_stateSize(self.model, state_spec))
+            mujoco.mj_getState(self.model, self.data, initial_state, state_spec)
+            self._display_model = copy.copy(self.model)
+            self._display_data = mujoco.MjData(self._display_model)
+            mujoco.mj_copyData(self._display_data, self._display_model, self.data)
+        display_model = self._display_model if self.readonly_viewer else self.model
+        display_data = self._display_data if self.readonly_viewer else self.data
         # launch, noting the render thread the viewer starts
         before = set(threading.enumerate())
-        viewer = mujoco.viewer.launch_passive(self.model, self.data,
+        viewer = mujoco.viewer.launch_passive(display_model, display_data,
                                               show_left_ui=False, show_right_ui=False)
         render_threads = [t for t in threading.enumerate() if t not in before]
-        
-        # camera 3 m out, looking at pelvis height
-        viewer.cam.azimuth = 140
-        viewer.cam.elevation = -20
-        viewer.cam.distance = 3.0
-        viewer.cam.lookat[:] = (0.0, 0.0, 0.8)
         try:
+            # camera 3 m out, looking at pelvis height
+            with viewer.lock():
+                viewer.cam.azimuth = 140
+                viewer.cam.elevation = -20
+                viewer.cam.distance = 3.0
+                viewer.cam.lookat[:] = (0.0, 0.0, 0.8)
+            if self.readonly_viewer:
+                # Drain startup GUI actions while physics is still frozen, then
+                # display the intended initial state before the trial handshake.
+                viewer.sync(state_only=True)
+                with viewer.lock():
+                    mujoco.mj_copyData(self._display_data, self._display_model, self.data)
+                viewer.sync(state_only=True)
+                current_state = np.empty_like(initial_state)
+                mujoco.mj_getState(self.model, self.data, current_state, state_spec)
+                if not np.array_equal(current_state, initial_state):
+                    raise RuntimeError("Watch-only viewer mutated the initial physics state")
             yield viewer
         finally:
             # close, then wait for the render thread to exit
             viewer.close()
             for t in render_threads:
                 t.join(timeout=2.0)
+            self._display_model = self._display_data = None
 
     def draw_overlays(self, scn: mujoco.MjvScene):
         """Append the reference ball and the commanded and actual twist arrows to `scn`, as in mjlab."""
@@ -389,10 +419,17 @@ class Simulation:
         now = time.perf_counter()
         if viewer is None or now < next_render:
             return next_render
-        viewer.user_scn.ngeom = 0
-        self.draw_overlays(viewer.user_scn)
+        with viewer.lock():
+            if self.readonly_viewer:
+                mujoco.mj_copyData(self._display_data, self._display_model, self.data)
+            viewer.user_scn.ngeom = 0
+            self.draw_overlays(viewer.user_scn)
+        # set_texts can wait on the render thread, so keep it outside viewer.lock.
         self.draw_legend(viewer, now)
-        viewer.sync()
+        if self.readonly_viewer:
+            viewer.sync(state_only=True)
+        else:
+            viewer.sync()
         return max(next_render + 1.0 / RENDER_HZ, now)
 
     def draw_legend(self, viewer, now: float):

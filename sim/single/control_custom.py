@@ -7,6 +7,7 @@ from control_base import run
 from policy.config import G1Config
 from utils.kcf_controller import (
     KCFCommand,
+    REFERENCE_MODES,
     get_default_mpc_config,
     resolve_mpc_settings,
 )
@@ -14,7 +15,7 @@ from utils.g1_kcf_state import g1_closed_loop_state
 
 
 class CustomCommand(KCFCommand):
-    """Select MPC settings; execution is shared with the existing trial runner."""
+    """Run the configured MPC and reference independently of simulation trials."""
 
     def __init__(
         self,
@@ -43,14 +44,17 @@ class CustomCommand(KCFCommand):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="G1 custom controller: KCF L-BFGS-B MPC (pair with simulation.py)."
+        description="G1 custom controller: KCF iCEM MPC (pair with simulation.py)."
     )
     parser.add_argument(
         "--single-integrator",
         action="store_true",
-        help="Use ideal body-twist single-integrator prediction instead of KCF",
+        help="Use single-integrator prediction and its configured gains (iCEM unchanged)",
     )
-    parser.add_argument(
+    reference = parser.add_mutually_exclusive_group()
+    reference.add_argument('--reference-mode', choices=REFERENCE_MODES,
+                           help='Override the reference selected in mpc_config.py')
+    reference.add_argument(
         "--lissajous",
         action="store_true",
         help="Track the configured Lissajous pose/twist trajectory instead of a fixed target",
@@ -63,7 +67,7 @@ def main():
     cfg = G1Config()
     source = CustomCommand(
         cfg.cmd_scale,
-        reference_mode="lissajous" if args.lissajous else None,
+        reference_mode=args.reference_mode or ("lissajous" if args.lissajous else None),
         prediction_model="single_integrator" if args.single_integrator else None,
     )
     try:

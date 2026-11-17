@@ -5,7 +5,8 @@ using the same frozen RL locomotion policy. The selected model is the original
 epoch-1540 checkpoint; no fine-tuned candidate was accepted.
 
 This checkout is a simulation/testing handover, not a hardware driver or a
-real-time-qualified implementation. See the [formulation and handover](KCF_MPC/docs/HANDOVER.md).
+hardware-qualified implementation. The active optimizer is GPU-resident iCEM;
+see the [formulation and usage](KCF_MPC/README.md).
 
 ## Install
 
@@ -50,27 +51,40 @@ CUDA_VISIBLE_DEVICES=0 python KCF_MPC/scripts/visual_recovery_trial.py smoke_01 
   --smoke-test --synchronous --headless
 
 CUDA_VISIBLE_DEVICES=0 python KCF_MPC/scripts/visual_recovery_trial.py kcf_01 \
-  --lissajous --duration 20 --synchronous --headless
+  --lissajous --initial-xy 0 0 --duration 20 --headless
 
 CUDA_VISIBLE_DEVICES=0 python KCF_MPC/scripts/visual_recovery_trial.py si_01 \
-  --lissajous --duration 20 --synchronous --headless --single-integrator
+  --lissajous --initial-xy 0 0 --duration 20 --headless --single-integrator
 ```
 
 Omit `--headless` to open the MuJoCo viewer. Synchronous mode pauses physics
 during each MPC solve: 20 simulated seconds can take longer in wall time.
+Trial viewers are observation-only: camera controls work, but GUI resets and
+mouse forces cannot alter the measured experiment.
 Omit `--synchronous` for asynchronous trials, including figure-eight testing.
-The native GPU evaluator is now selected, but measured solves still exceed
-20 ms. Fresh matched 20-second tests passed synchronous and asynchronous
-quality/reliability gates in balanced mode; this is not universal or real-time
-qualification. See the [handover and qualification scope](KCF_MPC/docs/HANDOVER.md#profiling-and-acceptance).
+The native GPU evaluator and forward-only iCEM are selected. Evaluate tracking,
+completed worker/request timing, missed handovers and fallbacks together.
+Finite MuJoCo runs do not establish hard-real-time or hardware qualification.
 `--check` prints the complete plan without starting physics.
 
-Both figure-eight runs use the same scenario, cost and command bounds; SI changes
-only the prediction model. This is a shared-formulation comparison, not a claim
-that either controller is independently optimally tuned or generally superior.
-Without `--lissajous`, the trial tests fixed-target recovery with a continuous
-hold requirement and timeouts. The existing trial08 profile uses `gtol=0.003`;
-the direct controller uses `gtol=0.0015`. Cleanup does not retune either.
+Both figure-eight runs use the same scenario, formulation and command bounds.
+KCF uses the top-level gains in `KCF_MPC/config/mpc_config.py`; SI uses its
+`single_integrator_gains` block (`state_weights`, `terminal_state_weights`,
+`input_weight`, `command_change_weights`). SI has separately tuned gains.
+Editing the SI block affects SI only, in both asynchronous and synchronous runs.
+This is an independently tuned comparison, not a shared-gain comparison.
+Neither configuration establishes general superiority.
+The trial inherits the configured reference; `fixed` mode tests recovery with a
+continuous hold requirement and timeouts. Only iCEM is supported.
+
+For smooth waypoint tracking with explicit stops, select `reference_mode="waypoints"`
+and edit `waypoint_reference` in `KCF_MPC/config/mpc_config.py`.
+No trajectory flag or extra JSON file is needed. Add `--single-integrator` for
+the same SI comparison. The configured example includes smooth startup and a
+final hold (24 s total).
+Current iCEM constrains command rates inside optimization and penalizes predicted
+tilt. Startup references hold the measured pose briefly, then blend into motion.
+These are transient-quality measures, not a guarantee of hardware balance.
 
 `KCF_MPC/mpc/` is the controller library; `mpc/native/` contains its fixed CUDA
 rollout and JAX FFI bridge. Simulation,
@@ -122,8 +136,8 @@ python sim/single/simulation.py --log interactive_01 --log_hz 100
 Terminal 2, choose one:
 
 ```bash
-python sim/single/control_custom.py --lissajous
-python sim/single/control_custom.py --lissajous --single-integrator
+python sim/single/control_custom.py
+python sim/single/control_custom.py --single-integrator
 python sim/single/control_kb.py
 python sim/single/control_joy.py
 ```
@@ -131,8 +145,24 @@ python sim/single/control_joy.py
 The simulator owns physics, RL inference, PD control, logging and the viewer.
 MPC sends body-frame `[vx, vy, wz]` to the RL policy over localhost ZeroMQ
 (ports 5555/5556). Policy ticks are 20 ms, physics ticks are 2 ms. Commands time
-out to zero after 0.5 s without an update. Without `--lissajous`, the custom
-controller holds a fixed target. The keyboard window must have focus; the
+out to zero after 0.5 s without an update. Select `reference_mode` in
+`KCF_MPC/config/mpc_config.py`: `fixed`, `lissajous`, `waypoints`, `rounded_square`,
+`hairpin`, `slalom`, or `stop_turn_go`.
+Targets, figure-eight dimensions/speed, and timed waypoint poses are defined
+there; no trial script is needed. Both the standalone controller and trial launcher
+accept `--reference-mode NAME` as a process-local override. For example:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python KCF_MPC/scripts/visual_recovery_trial.py kcf_hairpin_01 \
+  --reference-mode hairpin --duration 120 --synchronous
+```
+
+Add `--single-integrator` for SI, or `--headless` to suppress the trial viewer.
+The square, hairpin and slalom keep moving through smooth finite-radius turns;
+stop–turn–go includes standing and in-place turns. Tune their named config blocks;
+see [reference parameters](KCF_MPC/README.md#select-a-reference-in-the-controller-config).
+`--lissajous` remains an optional process-local
+override. The keyboard window must have focus; the
 joystick entry point expects an Xbox-compatible controller.
 
 Stop the simulator cleanly to save its logs. Reusing an interactive log name

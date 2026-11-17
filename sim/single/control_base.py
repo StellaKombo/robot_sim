@@ -102,8 +102,14 @@ def run(cmd_source: CommandSource, cfg: G1Config):
     have_state = False
     last_t = 0.0
     next_tick = time.perf_counter()
+    feedback_driven = bool(getattr(cmd_source, 'feedback_driven', False))
     try:
         while True:
+            if feedback_driven:
+                # Wait for fresh feedback, bounded by one publication period.
+                # On a timeout still call get(): its wall-clock freshness guard
+                # must continue operating even when the simulator goes quiet.
+                state_sub.poll(timeout=max(1, round(period * 1000)), flags=zmq.POLLIN)
             # newest state from the sim, if a new one arrived
             try:
                 t, q, v, prev_action = unpack_state(state_sub.recv(zmq.NOBLOCK), 7 + nu, 6 + nu, nu)
@@ -121,6 +127,9 @@ def run(cmd_source: CommandSource, cfg: G1Config):
             # ask the source for a command, then send it with any reference point it set
             cmd = cmd_source.get(state)
             cmd_pub.send(pack_twist(cmd, cmd_source.ref))
+
+            if feedback_driven:
+                continue
 
             # fixed-rate ticks; after a stall, resync instead of firing a burst of late ticks
             next_tick += period

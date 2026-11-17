@@ -1,6 +1,4 @@
 """G1 MPC execution: startup, feedback, solves, command buffering, and tracing.
-
-Prediction and optimization live in KCF_MPC
 """
 
 from collections import deque
@@ -23,7 +21,11 @@ KCF_ROOT = Path(ROOT_DIR) / "KCF_MPC"
 if str(KCF_ROOT) not in sys.path:
     sys.path.insert(0, str(KCF_ROOT))
 
-from config.mpc_config import get_default_mpc_config
+from config.mpc_config import (
+    REFERENCE_MODES,
+    get_default_mpc_config,
+    resolve_mpc_model_config,
+)
 from KCF_MPC.mpc.mpc import create_mpc_controller
 from KCF_MPC.mpc.mpc_runtime import StartupGCFreeze
 from KCF_MPC.mpc.mpc_trace import MPCSolveTrace
@@ -72,7 +74,8 @@ def resolve_mpc_settings(
     """Load MPC settings with optional process-local predictor/reference overrides.
 
     Explicit settings are copied, so overrides cannot mutate a saved trial plan.
-    Omitting overrides preserves every configured numerical value.
+    An explicit predictor selection also selects that model's gain profile.
+    Omitting it preserves resolved settings, including saved per-run gains.
     """
     settings = get_default_mpc_config() if settings is None else deepcopy(settings)
     selected_model = (
@@ -83,21 +86,24 @@ def resolve_mpc_settings(
     if selected_model not in ("kcf", "single_integrator"):
         raise ValueError("prediction_model must be 'kcf' or 'single_integrator'")
     if prediction_model is not None:
-        settings["prediction_model"] = selected_model
+        settings = resolve_mpc_model_config(settings, prediction_model=selected_model)
     if reference_mode is not None:
-        if reference_mode not in ("fixed", "lissajous"):
-            raise ValueError("reference_mode must be 'fixed' or 'lissajous'")
+        if reference_mode not in REFERENCE_MODES:
+            raise ValueError(f"reference_mode must be one of {REFERENCE_MODES}")
         settings["reference_mode"] = reference_mode
     return settings
 
 
 class KCFCommand(CommandSource):
-    """Track a fixed or Lissajous reference using the selected MPC predictor.
+    """Track a configured planar reference using the selected MPC predictor.
 
     The optimizer, cost and existing input bounds belong to KCF_MPC/mpc/mpc.py.
-    Its JAX backend compiles joint cost-and-gradient evaluations for SciPy
-    L-BFGS-B.
+    iCEM performs forward-only GPU population evaluation.
     """
+
+    # Keep the publisher phase-locked to fresh feedback, not another 50 Hz wall
+    # clock that can straddle messages and skip a physics tick. Solves stay async.
+    feedback_driven = True
 
     def __init__(
         self,
@@ -120,7 +126,12 @@ class KCFCommand(CommandSource):
         if self.mpc.backend == "jax":
             self.backend_label += f"/{self.mpc.jax_platform}"
         self.backend_label += (
-            f"/{str(self.mpc.dtype).removeprefix('torch.')}/{self.mpc.solver}-lbfgsb"
+            f"/{str(self.mpc.dtype).removeprefix('torch.')}/{self.mpc.solver}"
+        )
+        self.solver_label = 'iCEM'
+        self.solver_description = (
+            f"populations={self.mpc.icem_config.populations} elites={self.mpc.icem_config.elites} "
+            f"beta={self.mpc.icem_config.noise_beta:g}"
         )
 
         expected_tracked_indices = tuple(range(len(TRACKING_LABELS)))
@@ -225,7 +236,7 @@ class KCFCommand(CommandSource):
                         )
                 if not self.quiet:
                     print(
-                        f"[MPC L-BFGS-B initialization] backend={self.backend_label} "
+                        f"[MPC {self.solver_label} initialization] backend={self.backend_label} "
                         f"compute={1000*(perf_counter()-began):.1f}ms "
                         f"iterations={result.nit} status=solver_success "
                         f"termination={result.message} (command not published)",
@@ -237,8 +248,8 @@ class KCFCommand(CommandSource):
                 self.mpc.reset()
         if not self.quiet:
             print(
-                f"Using {KCF_ROOT / 'mpc' / 'mpc.py'} (L-BFGS-B, {self.backend_label}); "
-                f"ftol={self.mpc.function_tolerance:g} gtol={self.mpc.gradient_tolerance:g}; "
+                f"Using {KCF_ROOT / 'mpc' / 'mpc.py'} ({self.solver_label}, {self.backend_label}); "
+                f"{self.solver_description}; "
                 f"Q_diag={self.mpc.state_weights.detach().cpu().tolist()} "
                 f"Qf_diag={self.mpc.terminal_state_weights.detach().cpu().tolist()}; "
                 f"R={self.mpc.input_weight:g} "
@@ -252,7 +263,7 @@ class KCFCommand(CommandSource):
                 f"application_lead_steps={self.application_lead_steps}; "
                 f"handover_steps={self.handover_timing.minimum}..{self.handover_timing.maximum} "
                 f"(initial={self.handover_timing.initial}); "
-                "warm_start=paper (random startup, shift + random tail); "
+                f"warm_start=iCEM shifted mean/elites + exact feasible plan; "
                 f"settings from {KCF_ROOT / 'config' / 'mpc_config.py'}",
                 flush=True,
             )
@@ -342,6 +353,9 @@ class KCFCommand(CommandSource):
         self.optimizer_time = 0.0
         self.start_time_seen = self.t_start
         timing = getattr(self, "handover_timing", None)
+        path = getattr(self, "reference_path", None)
+        if path is not None:
+            path.reset_initial_pose()
         if timing is not None:
             timing.reset()
         worker = getattr(self, "_worker", None)
@@ -612,7 +626,7 @@ class KCFCommand(CommandSource):
                 else "accepted" if accepted else reason
             )
             self._console.write(
-                f"[MPC L-BFGS-B] t={outcome.request.state_time:.3f}s "
+                f"[MPC {self.solver_label}] t={outcome.request.state_time:.3f}s "
                 f"backend={self.backend_label} compute={1000*self.solve_time:.1f}ms "
                 f"predict={1000*result.get('prediction_seconds',0.):.1f}ms "
                 f"solve={1000*self.optimizer_time:.1f}ms iterations={result.get('nit', 'n/a')} "
@@ -641,6 +655,9 @@ class KCFCommand(CommandSource):
             self.reset()
         lead = 0 if self.synchronous_feedback else self.application_lead_steps
         application_time = float(state.t + lead * self.dt)
+        if self.reference_path._initial_pose is None and np.isfinite(state.q).all():
+            self.reference_path.set_initial_pose(
+                [state.q[0], state.q[1], g1_world_heading(state)])
         self.ref = np.asarray(
             self.reference(application_time - self.t_start)[0][:2]
         ).copy()
@@ -652,7 +669,13 @@ class KCFCommand(CommandSource):
             initial_observation = self._encode_state(state)
             if np.isfinite(initial_observation).all():
                 self.theta_prev = g1_world_heading(state, self.theta_prev)
-            return np.zeros(3, dtype=np.float32)
+            command = np.zeros(3, dtype=np.float32)
+            if not self.synchronous_feedback:
+                # Retain this actually published next-tick zero commitment, so
+                # first fresh feedback need not spend another tick creating it.
+                self._command_history.append((application_time, command.copy()))
+                self._last_application_time = application_time
+            return command
 
         observation = self._encode_state(state)
         duplicate = (
@@ -662,6 +685,9 @@ class KCFCommand(CommandSource):
         )
         if self.last_state_time == state.t and not duplicate:
             self.reset()
+            if np.isfinite(state.q).all():
+                self.reference_path.set_initial_pose(
+                    [state.q[0], state.q[1], g1_world_heading(state)])
             observation = self._encode_state(state)
             self.ref = np.asarray(
                 self.reference(application_time - self.t_start)[0][:2]
