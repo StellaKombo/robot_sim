@@ -31,8 +31,8 @@ from utils.math_utils import gravity_from_quat, q_to_rom, v_to_rom
 from utils.zmq_utils import CMD_PORT, STATE_PORT, bind_pub, bind_sub, pack_state, unpack_twist
 
 # GLOBAL VARIABLES
-XML_PATH = os.path.join(ROOT_DIR, "models", "g1_23dof.xml")
-POLICY_PATH = os.path.join(ROOT_DIR, "policy", "g1_23dof_vel.pt")
+XML_PATH = os.path.join(ROOT_DIR, "deploy_robot", "models", "g1", "g1_29dof_mode11_scene.xml")
+POLICY_PATH = os.path.join(ROOT_DIR, "deploy_robot", "policy", "g1", "g1_29dof_vel.onnx")
 SIM_DT = 0.002      # [s] physics timestep
 LOG_HZ = 100.0      # [Hz] default logging rate; must divide the sim rate exactly
 RENDER_HZ = 50.0    # [Hz] visual rendering frequency
@@ -177,8 +177,7 @@ class Simulation:
         self.log_dt = self.log_decimation * sim_dt
 
         # policy
-        self.device = torch.device("cpu")
-        self.policy = load_policy(policy_path, self.device)
+        self.policy = load_policy(policy_path)
         self.cmd_scale = np.asarray(self.cfg.cmd_scale, dtype=np.float32)
         self.default_j = np.asarray(self.cfg.default_joint_pos, dtype=np.float32)
         self.reset()
@@ -211,8 +210,8 @@ class Simulation:
 
     # POLICY
 
-    def build_observation(self) -> torch.Tensor:
-        """80-dim policy observation, in the exact layout the policy was trained on."""
+    def build_observation(self) -> np.ndarray:
+        """98-dim policy observation, in the exact layout the policy was trained on."""
         
         d = self.data
         
@@ -235,16 +234,16 @@ class Simulation:
             gravity,                    # 3:6
             self.cmd,                   # 6:9
             gait_phase,                 # 9:11
-            qpos_j - self.default_j,    # 11:34
-            qvel_j,                     # 34:57
-            self.prev_action,           # 57:80
+            qpos_j - self.default_j,    # 11:40
+            qvel_j,                     # 40:69
+            self.prev_action,           # 69:98
         ]).astype(np.float32)
-        return torch.from_numpy(obs).unsqueeze(0).to(self.device)
+        return obs
 
     def policy_step(self):
         """One policy query; the action is held until the next one."""
         # run the policy; the action also feeds the next observation
-        self.action = self.policy(self.build_observation()).squeeze(0).cpu().numpy().astype(np.float32)
+        self.action = self.policy.inference(self.build_observation()).astype(np.float32)
         self.prev_action = self.action
 
     # PHYSICS
@@ -469,7 +468,7 @@ class Simulation:
         # one folder per run under data/data/
         out_dir = os.path.join(ROOT_DIR, "data", "data", self.log_name)
         os.makedirs(out_dir, exist_ok=True)
-        full_path = os.path.join(out_dir, "g1_23dof_data.npz")
+        full_path = os.path.join(out_dir, "g1_29dof_data.npz")
         rom_path = os.path.join(out_dir, "g1_rom_data.npz")
 
         # preserve the recording schema's (B, T, dim) batch dimension
@@ -483,7 +482,7 @@ class Simulation:
         np.savez(full_path, q_log=q, v_log=v, cmd_log=cmd, **meta)
         np.savez(rom_path, q_rom_log=q_to_rom(q), v_rom_log=v_to_rom(q, v), cmd_log=cmd, **meta)
         print(f"Saved {q.shape[1]} samples at {1.0 / self.log_dt:g} Hz to {out_dir}/ "
-              "(g1_23dof_data.npz, g1_rom_data.npz).")
+              "(g1_29dof_data.npz, g1_rom_data.npz).")
 
 
 ############################################################################

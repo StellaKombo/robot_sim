@@ -1,6 +1,6 @@
 ##
 #
-#  Plot the full state of randomly sampled trajectories from a _23dof_data.npz dataset.
+#  Plot the full state of randomly sampled trajectories from a _29dof_data.npz dataset.
 #
 ##
 
@@ -143,8 +143,8 @@ def main():
     parser = argparse.ArgumentParser(description="Plot and replay a named simulation run.")
     parser.add_argument("run", help="run name saved under data/data/<run>/")
     args = parser.parse_args()
-    data_path = os.path.join(ROOT_DIR, "data", "data", args.run, "g1_23dof_data.npz")
-    xml_path = os.path.join(ROOT_DIR, "models", "g1_23dof.xml")
+    data_path = os.path.join(ROOT_DIR, "data", "data", args.run, "g1_29dof_data.npz")
+    xml_path = os.path.join(ROOT_DIR, "deploy_robot", "models", "g1", "g1_29dof_mode11_scene.xml")
 
     # trajectories to plot
     num_trajectories = 3

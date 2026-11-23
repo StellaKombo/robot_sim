@@ -9,7 +9,7 @@ install:
 	git lfs install --local
 	git submodule update --init --recursive
 	git -C KCF_MPC lfs install --local
-	git -C KCF_MPC lfs pull --include="results/g1_kcf_handoff_epoch01540/*.pt" --exclude=""
+	git -C KCF_MPC lfs pull --include="results/g1_kcf_handoff_epoch03240/*.pt" --exclude=""
 	conda env create -f environment.yml
 	conda env config vars set -n $(ENV) ROBOT_SIM_ROOT_DIR="$(CURDIR)"
 

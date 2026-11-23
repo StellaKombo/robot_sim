@@ -40,7 +40,7 @@ class PolicyRun:
 
 def joint_names():
     """Use the actual qpos joint order, not alphabetical or actuator order."""
-    body = ET.parse(ROOT / "models/g1_23dof.xml").getroot().find("worldbody")
+    body = ET.parse(ROOT / "deploy_robot/models/g1/g1_29dof_mode11.xml").getroot().find("worldbody")
     return [joint.attrib["name"].removesuffix("_joint") for joint in body.iter("joint")
             if joint.get("type", "hinge") not in {"free", "ball"}]
 
@@ -50,7 +50,7 @@ def verify_configuration(directory):
     path = directory / "pair_plan.json"
     hashes = json.loads(path.read_text()).get("source_hashes", {}) if path.is_file() else {}
     verified = True
-    for name in ("policy/config.py", "models/g1_23dof.xml"):
+    for name in ("policy/config.py", "deploy_robot/models/g1/g1_29dof_mode11.xml"):
         recorded = hashes.get(name)
         if recorded is None:
             verified = False
@@ -68,7 +68,7 @@ def load_policy_run(directory, *, label=None):
         directory = ROOT / "data/data" / directory
     verified = verify_configuration(directory)
     cfg = G1Config()
-    with np.load(directory / "g1_23dof_data.npz", allow_pickle=False) as data:
+    with np.load(directory / "g1_29dof_data.npz", allow_pickle=False) as data:
         q = np.asarray(data["q_log"], dtype=float)
         dt = float(data["control_dt"])
         log_dt = float(data["log_dt"] if "log_dt" in data else data["sim_dt"])
@@ -80,7 +80,7 @@ def load_policy_run(directory, *, label=None):
     if (stamps.ndim != 1 or len(stamps) < 3 or previous.shape != (len(stamps), width)
             or commands.shape != (len(stamps), 3) or q.ndim != 3
             or q.shape[0] != 1 or q.shape[2] != 7 + width or q.shape[1] < 2):
-        raise ValueError("Expected single-environment full state and matching (T,23) policy actions / (T,3) commands")
+        raise ValueError("Expected single-environment full state and matching (T,29) policy actions / (T,3) commands")
     if (not np.isfinite([dt, log_dt]).all() or min(dt, log_dt) <= 0
             or not all(np.isfinite(x).all() for x in (stamps, previous, commands, q))
             or not np.allclose(np.diff(stamps), dt, rtol=1e-6, atol=1e-8)):

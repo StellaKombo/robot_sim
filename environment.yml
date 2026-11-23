@@ -8,6 +8,8 @@ dependencies:
   - matplotlib>=3.8
   - pygame
   - pyzmq>=26
+  - onnx
+  - onnxruntime
   - pytorch=2.14.1
   - setuptools<81
   - pip

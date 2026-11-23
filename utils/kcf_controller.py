@@ -139,15 +139,15 @@ class KCFCommand(CommandSource):
             self.mpc, "observation_dim", self.mpc.model.config.state_dim
         )
         if (
-            observation_dim != 85
-            or self.mpc.model.config.state_dim != 85
+            observation_dim != 103
+            or self.mpc.model.config.state_dim != 103
             or self.mpc.model.config.L_embed != 0
             or self.mpc.input_dim != 3
             or tuple(self.mpc.tracking_feature_indices.cpu().tolist())
             != expected_tracked_indices
         ):
             raise ValueError(
-                "G1 requires the native 85-state model " "with three commands"
+                "G1 requires the native 103-state model " "with three commands"
             )
         if np.any(self.mpc.lower_bounds < -self.cmd_scale) or np.any(
             self.mpc.upper_bounds > self.cmd_scale
@@ -158,6 +158,13 @@ class KCFCommand(CommandSource):
         self.N = self.mpc.horizon
         self.dt = self.cfg.control_dt
         self.gait_period = self.cfg.gait_period
+        self.standing_hold = settings.get("standing_hold")
+        if self.standing_hold is not None:
+            hold = self.standing_hold
+            if (not all(np.isfinite(value) and value > 0 for value in hold.values())
+                    or hold["enter_position_m"] >= hold["exit_position_m"]
+                    or hold["enter_heading_rad"] >= hold["exit_heading_rad"]):
+                raise ValueError("Standing hold requires positive entry limits below release limits")
         self.quiet, self.verbose = quiet, verbose
         self.solve_count = self.failure_count = self.deadline_miss_count = 0
         self.solver_failure_count = self.stale_rejections = self.reset_discards = 0
@@ -341,6 +348,9 @@ class KCFCommand(CommandSource):
         self.last_state_time = None
         self.last_observation = None
         self.previous_command = np.zeros(3, dtype=np.float32)
+        self._standing_hold_active = False
+        self._standing_hold_releasing = False
+        self._standing_hold_since = None
         self._plan = None
         self._active_outcome = None
         self._commitment = None
@@ -378,7 +388,7 @@ class KCFCommand(CommandSource):
             prefix_controls.flags.writeable = False
         previous = np.array(self.previous_command, dtype=np.float32, copy=True)
         previous.flags.writeable = False
-        heading = self.theta_prev if observation.shape == (85,) else None
+        heading = self.theta_prev if observation.shape == (103,) else None
         return SolveRequest(
             self._generation,
             self._request_counter,
@@ -391,6 +401,30 @@ class KCFCommand(CommandSource):
             previous,
             heading_world=heading,
         )
+
+    def observe_applied_command(self, application_time, command):
+        """Reconcile an external policy's actual input with planned commitments.
+
+        Optional ROS-adapter acknowledgement; the existing simulation path is
+        unchanged. A manual override or late packet invalidates predictions
+        based on a different prefix instead of silently pretending it applied.
+        """
+        command = np.asarray(command, dtype=np.float32)
+        if (not np.isfinite(application_time) or command.shape != (3,)
+                or not np.isfinite(command).all()):
+            raise ValueError("Applied command must be a finite timestamp and twist")
+        expected = self._issued_at(application_time)
+        if expected is not None and not np.allclose(expected, command, atol=1e-6, rtol=0):
+            self._cancel_commitment("applied_command_mismatch")
+            self._plan = None
+        history = [(t, u) for t, u in self._command_history
+                   if abs(t - application_time) > 1e-8]
+        history.append((float(application_time), command.copy()))
+        self._command_history.clear()
+        self._command_history.extend(sorted(history, key=lambda item: item[0]))
+        if (self._last_application_time is None
+                or application_time >= self._last_application_time - 1e-8):
+            self.previous_command = command.copy()
 
     def _issued_at(self, slot_time):
         history = [
@@ -702,7 +736,78 @@ class KCFCommand(CommandSource):
             self.last_state_time = float(state.t)
             self.last_observation = observation.copy()
 
-        if self.synchronous_feedback:
+        if fresh and self.standing_hold is not None:
+            poses, twists = self.reference(
+                application_time - self.t_start + self.dt * np.arange(self.N + 1)
+            )
+            stationary = (np.max(np.abs(twists)) < 1e-6
+                          and np.max(np.abs(poses - poses[0])) < 1e-6)
+            position_error = np.linalg.norm(observation[:2] - poses[0, :2])
+            heading_error = abs(np.arctan2(
+                np.sin(self.theta_prev - poses[0, 2]),
+                np.cos(self.theta_prev - poses[0, 2]),
+            ))
+            hold = self.standing_hold
+            holding = (stationary and position_error < hold["exit_position_m"]
+                       and heading_error < hold["exit_heading_rad"]
+                       if self._standing_hold_active else
+                       stationary and position_error < hold["enter_position_m"]
+                       and heading_error < hold["enter_heading_rad"]
+                       and np.linalg.norm(observation[4:6]) < hold["enter_linear_speed_mps"]
+                       and abs(observation[6]) < hold["enter_yaw_rate_rps"]
+                       and np.linalg.norm(self.previous_command) < self.cfg.stand_cmd_threshold)
+            if not self._standing_hold_active:
+                if not holding:
+                    self._standing_hold_since = None
+                elif self._standing_hold_since is None:
+                    self._standing_hold_since = state.t
+                holding = (holding and self._standing_hold_since is not None
+                           and state.t - self._standing_hold_since >= hold["settle_seconds"])
+            self._standing_hold_releasing = self._standing_hold_active and not holding
+            if self._standing_hold_releasing:
+                rates = self.mpc.icem_config.command_rate_limits
+                limit = np.asarray(rates) * self.dt if rates is not None else np.inf
+                # The first unplanned handover prefix is zero. Reach it at the
+                # configured rate before releasing this nonzero standing input.
+                holding = np.any(np.abs(self.previous_command) > limit + 1e-7)
+            if holding != self._standing_hold_active:
+                # Outstanding plans belong to the previous execution state.
+                # Reset only on the solver thread; preserve the reference clock.
+                self._generation += 1
+                self._worker.invalidate()
+                if self._ready_outcome is not None:
+                    self._consume(self._ready_outcome, application_time, now, state)
+                self._plan = self._active_outcome = None
+                self._commitment = self._ready_outcome = None
+                self._commitment_invalid = None
+                self._standing_hold_active = holding
+                if not holding:
+                    self._standing_hold_since = None
+        if self._standing_hold_active:
+            self._advance_handover(application_time, now, state)
+            rates = self.mpc.icem_config.command_rate_limits
+            limit = np.asarray(rates, dtype=np.float32) * self.dt if rates is not None else np.inf
+            target_heading = self.reference(application_time - self.t_start)[0][2]
+            yaw_error = np.arctan2(np.sin(self.theta_prev - target_heading),
+                                   np.cos(self.theta_prev - target_heading))
+            # Correct slow standing yaw drift without restarting the gait clock.
+            yaw_limit = 0.8 * self.cfg.stand_cmd_threshold
+            target = np.array([0.0, 0.0, np.clip(
+                -self.standing_hold["heading_gain"] * yaw_error
+                - self.standing_hold["yaw_rate_damping"] * observation[6],
+                -yaw_limit, yaw_limit,
+            )], dtype=np.float32)
+            if self._standing_hold_releasing:
+                target[:] = 0.0
+            command = (self.previous_command + np.clip(target - self.previous_command, -limit, limit)
+                       if fresh else self.previous_command.copy())
+            index, age, reason = -1, np.nan, "standing_hold"
+            if self._standing_hold_releasing:
+                reason = "standing_release"
+            if now - self._last_feedback_wall >= self.live_feedback_timeout:
+                command = np.zeros(3, dtype=np.float32)
+                reason = "feedback_timeout"
+        elif self.synchronous_feedback:
             if not fresh:
                 return self.previous_command.copy()
             outcome = self._worker.solve_inline(self._request(state, observation, now))
@@ -751,7 +856,7 @@ class KCFCommand(CommandSource):
             command, index, age, reason = self._select_command(application_time, now)
         selected_at = perf_counter()
         callback_seconds = selected_at - now
-        if not self.synchronous_feedback:
+        if not self.synchronous_feedback and not self._standing_hold_active:
             extra_steps = int(np.floor((callback_seconds + 1e-9) / self.dt))
             application_time += extra_steps * self.dt
             if extra_steps:
