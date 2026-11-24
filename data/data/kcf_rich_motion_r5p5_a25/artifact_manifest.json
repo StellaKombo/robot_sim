@@ -1,0 +1,106 @@
+{
+  "comparison_metrics.csv": {
+    "bytes": 2870,
+    "sha256": "3f8f9c7078cce903affc2f4aef999c23b47d2c3d2f4f243c2c707b6607212489"
+  },
+  "coordinated_maneuver.png": {
+    "bytes": 499604,
+    "sha256": "9af5667103c9d5b4755a7492b0fac6478c3d8feea82aa4f5adf2c060040fcdc2"
+  },
+  "discovery_motion_trace.csv": {
+    "bytes": 1312962,
+    "sha256": "f3d26dd846a3f6046316b2a34a6ca89b4ca4ade5b15cab999e47e9657d76d42a"
+  },
+  "evidence.html": {
+    "bytes": 6903,
+    "sha256": "084a6b0855bd63b2e51f8c8d41ed6da0dc2faff32e1a3e801d63cf36c6ee05f1"
+  },
+  "frozen_configuration.json": {
+    "bytes": 23838,
+    "sha256": "2c5a1add20d7835c67d75315077dfd51cc03047a7859d6027f5e9584a6ce8081"
+  },
+  "maneuver_events.csv": {
+    "bytes": 4461,
+    "sha256": "c7e26d9a21474b13f3ecf4341b48f06ca6ba23313916de807b9e1cbc6c34d7b7"
+  },
+  "maneuver_storyboard.png": {
+    "bytes": 1246958,
+    "sha256": "2e015e21e5103bc78ed547e66079e3d8dfbaa277987cdbfd29963144077234ba"
+  },
+  "prediction_accuracy.png": {
+    "bytes": 121289,
+    "sha256": "ac46dc863e95bfac5d341d251c3d3f029cbe22ec687f12d53f00f478dc57e839"
+  },
+  "prediction_replay.csv": {
+    "bytes": 7841,
+    "sha256": "b146870db8e3b4f9a08667cd38d2ad15afd033d61345111219c230e8165715c5"
+  },
+  "prediction_replay.json": {
+    "bytes": 15748,
+    "sha256": "3a95cf4c8acbb4575b6db829f1fc9614c9abc9e6c95da3983f778c1fa19fe7ed"
+  },
+  "results.json": {
+    "bytes": 7751,
+    "sha256": "6941e834f8300f65bc11afd82dd017be0b2d80372962ef94808fadae68d66195"
+  },
+  "videos/discovery/avoidance_outcomes.png": {
+    "bytes": 385126,
+    "sha256": "d75bb2e2c128e90a7c47a18ecbe5a3eb7b59e57bff9d1b40de37c7e86d2a590f"
+  },
+  "videos/discovery/kcf_vs_si.mp4": {
+    "bytes": 2429271,
+    "sha256": "d7737d377363ecce622042bcf7641a7d4963f2f673303b3c86c6e6ed3275b2c8"
+  },
+  "videos/discovery/media_metadata.json": {
+    "bytes": 4237,
+    "sha256": "957f07f81615d19fd26a9ce7fe55e8ebb30a3467b9fd620fba4e3f0305943a00"
+  },
+  "videos/discovery/rom_playback_preview.png": {
+    "bytes": 71952,
+    "sha256": "e12f607b379ad4e8e4b2b8dd914f92ea99a27c4aa5cffa70ea53276080b0f3c8"
+  },
+  "videos/discovery/rom_states.png": {
+    "bytes": 395911,
+    "sha256": "67dfdadc46daa1a24c7efe12fc53185c75d9c56e9a90adc1c4891b8db1a063c0"
+  },
+  "videos/discovery/video_quality_check.png": {
+    "bytes": 357995,
+    "sha256": "8de4dfad7af223562419ab72874cd996a9cbc22caa5c3e400148c56e715881ea"
+  },
+  "videos/discovery_focus/kcf_vs_si.mp4": {
+    "bytes": 1709168,
+    "sha256": "e2c5559c9c7195ec7bb7f79cb176bec9b0c06b48d908a4fac9a3322ff3fca69d"
+  },
+  "videos/discovery_focus/media_metadata.json": {
+    "bytes": 4204,
+    "sha256": "659e8c13ecf8b203f903136e126070a05b3b2fc1b689041fef22057219029a4e"
+  },
+  "videos/discovery_focus/video_quality_check.png": {
+    "bytes": 358327,
+    "sha256": "e51a50cbbe73248c392ec7bd77164cb67a18c8abf5af92098ff9251a17f969ab"
+  },
+  "videos/validation_seed271828/avoidance_outcomes.png": {
+    "bytes": 386025,
+    "sha256": "bcb832fca6066015a4011777819303a1e60801ea45f8075debd71673469a84a8"
+  },
+  "videos/validation_seed271828/kcf_vs_si.mp4": {
+    "bytes": 2284774,
+    "sha256": "13363c023633e064cbbc3de7ec09e734ee30ef7a3ce962ffc33dbd088a69dc15"
+  },
+  "videos/validation_seed271828/media_metadata.json": {
+    "bytes": 4274,
+    "sha256": "ce8f7421dbd31404ababaa20163a936743b3d9a804bc64ac7607432012b45ef8"
+  },
+  "videos/validation_seed271828/rom_playback_preview.png": {
+    "bytes": 69903,
+    "sha256": "09662f5b8d6f195876bf28ef4d411f89af312fa0e847acf0f4e04b22ba68f397"
+  },
+  "videos/validation_seed271828/rom_states.png": {
+    "bytes": 383640,
+    "sha256": "3cdbf46833fa8af4778cfae9491d4f914f50c19dc7ab5faa6a1c7c501962ca45"
+  },
+  "videos/validation_seed271828/video_quality_check.png": {
+    "bytes": 361452,
+    "sha256": "b195279235d2d5471024ddbecb6a2ade3057991fdcea3501316d148e33e215dc"
+  }
+}

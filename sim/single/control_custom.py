@@ -51,6 +51,8 @@ def parse_args(argv=None):
         action="store_true",
         help="Use single-integrator prediction and its configured gains (iCEM unchanged)",
     )
+    parser.add_argument('--obstacle-avoidance', action='store_true',
+                        help='Enable the configured cost for the static sphere received from simulation')
     reference = parser.add_mutually_exclusive_group()
     reference.add_argument('--reference-mode', choices=REFERENCE_MODES,
                            help='Override the reference selected in mpc_config.py')
@@ -65,8 +67,12 @@ def parse_args(argv=None):
 def main():
     args = parse_args()
     cfg = G1Config()
+    settings = get_default_mpc_config()
+    if args.obstacle_avoidance:
+        settings['obstacle_cost']['enabled'] = True
     source = CustomCommand(
         cfg.cmd_scale,
+        settings=settings,
         reference_mode=args.reference_mode or ("lissajous" if args.lissajous else None),
         prediction_model="single_integrator" if args.single_integrator else None,
     )

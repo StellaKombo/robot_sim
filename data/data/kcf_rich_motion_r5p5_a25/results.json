@@ -1,0 +1,272 @@
+{
+  "configuration": {
+    "rho": 5.5,
+    "alpha": 25.0,
+    "horizon": 30,
+    "prediction_period_s": 0.02,
+    "deadline_ms": 20.0
+  },
+  "compared_scenarios": 6,
+  "new_visible_simulations": 10,
+  "kcf_qualified": 6,
+  "si_qualified": 0,
+  "kcf_avoids_si_contacts": 2,
+  "individual_all9_wins": 1,
+  "trials": [
+    {
+      "reference": "stopgo90",
+      "seed": 42,
+      "role": "discovery",
+      "kcf_qualified": true,
+      "si_qualified": false,
+      "kcf_avoids_si_contacts": true,
+      "both_avoid": false,
+      "qualified_all9": true,
+      "kcf_reverse": {
+        "start_s": 6.99,
+        "end_s": 9.56,
+        "duration_s": 2.58,
+        "mean_body_vx_mps": -0.35123538970947266,
+        "yaw_change_degrees": 50.00053787231445,
+        "start_xy": [
+          0.5988785028457642,
+          -0.10085249692201614
+        ],
+        "end_xy": [
+          0.14486026763916016,
+          -1.047387957572937
+        ]
+      },
+      "si_reverse": {
+        "start_s": 7.33,
+        "end_s": 10.0,
+        "duration_s": 2.68,
+        "mean_body_vx_mps": -0.34757164120674133,
+        "yaw_change_degrees": 11.22274112701416,
+        "start_xy": [
+          0.6643335819244385,
+          -0.1304742991924286
+        ],
+        "end_xy": [
+          0.2887771427631378,
+          -1.1515748500823975
+        ]
+      }
+    },
+    {
+      "reference": "stopgo90",
+      "seed": 314159,
+      "role": "fresh_seed",
+      "kcf_qualified": true,
+      "si_qualified": false,
+      "kcf_avoids_si_contacts": false,
+      "both_avoid": true,
+      "qualified_all9": false,
+      "kcf_reverse": {
+        "start_s": 6.98,
+        "end_s": 9.72,
+        "duration_s": 2.75,
+        "mean_body_vx_mps": -0.3457503318786621,
+        "yaw_change_degrees": 43.40943908691406,
+        "start_xy": [
+          0.6033892035484314,
+          -0.08527524024248123
+        ],
+        "end_xy": [
+          0.21372339129447937,
+          -1.0950636863708496
+        ]
+      },
+      "si_reverse": {
+        "start_s": 5.69,
+        "end_s": 6.0600000000000005,
+        "duration_s": 0.38,
+        "mean_body_vx_mps": -0.10946477204561234,
+        "yaw_change_degrees": -1.3641985654830933,
+        "start_xy": [
+          0.6327895522117615,
+          -0.05561189353466034
+        ],
+        "end_xy": [
+          0.5912514925003052,
+          -0.0003435024118516594
+        ]
+      }
+    },
+    {
+      "reference": "stopgo90",
+      "seed": 271828,
+      "role": "fresh_seed",
+      "kcf_qualified": true,
+      "si_qualified": false,
+      "kcf_avoids_si_contacts": true,
+      "both_avoid": false,
+      "qualified_all9": false,
+      "kcf_reverse": {
+        "start_s": 7.21,
+        "end_s": 9.68,
+        "duration_s": 2.48,
+        "mean_body_vx_mps": -0.3556661903858185,
+        "yaw_change_degrees": 50.35560607910156,
+        "start_xy": [
+          0.6000714898109436,
+          -0.140128031373024
+        ],
+        "end_xy": [
+          0.14654910564422607,
+          -1.0724350214004517
+        ]
+      },
+      "si_reverse": {
+        "start_s": 7.61,
+        "end_s": 9.120000000000001,
+        "duration_s": 1.52,
+        "mean_body_vx_mps": -0.32036900520324707,
+        "yaw_change_degrees": 66.52687072753906,
+        "start_xy": [
+          0.7450342774391174,
+          -0.21397249400615692
+        ],
+        "end_xy": [
+          1.0725857019424438,
+          -0.920682966709137
+        ]
+      }
+    },
+    {
+      "reference": "stopgo90_cross_a",
+      "seed": 314159,
+      "role": "fresh_direction",
+      "kcf_qualified": true,
+      "si_qualified": false,
+      "kcf_avoids_si_contacts": false,
+      "both_avoid": true,
+      "qualified_all9": false,
+      "kcf_reverse": {
+        "start_s": 10.25,
+        "end_s": 11.23,
+        "duration_s": 0.99,
+        "mean_body_vx_mps": -0.2192007154226303,
+        "yaw_change_degrees": 1.089900016784668,
+        "start_xy": [
+          1.286331295967102,
+          0.2563442885875702
+        ],
+        "end_xy": [
+          0.9049938917160034,
+          0.07342378795146942
+        ]
+      },
+      "si_reverse": {
+        "start_s": 10.200000000000001,
+        "end_s": 10.92,
+        "duration_s": 0.73,
+        "mean_body_vx_mps": -0.1273694634437561,
+        "yaw_change_degrees": 3.1425697803497314,
+        "start_xy": [
+          1.5328030586242676,
+          0.09584973752498627
+        ],
+        "end_xy": [
+          1.2642792463302612,
+          0.010106656700372696
+        ]
+      }
+    },
+    {
+      "reference": "stopgo90_cross_b",
+      "seed": 314159,
+      "role": "fresh_direction",
+      "kcf_qualified": true,
+      "si_qualified": false,
+      "kcf_avoids_si_contacts": false,
+      "both_avoid": true,
+      "qualified_all9": false,
+      "kcf_reverse": {
+        "start_s": 6.61,
+        "end_s": 10.23,
+        "duration_s": 3.63,
+        "mean_body_vx_mps": -0.3317926228046417,
+        "yaw_change_degrees": 93.30864715576172,
+        "start_xy": [
+          0.5843709111213684,
+          0.011039264500141144
+        ],
+        "end_xy": [
+          -0.11136703193187714,
+          -0.3069600760936737
+        ]
+      },
+      "si_reverse": {
+        "start_s": 6.7,
+        "end_s": 10.05,
+        "duration_s": 3.36,
+        "mean_body_vx_mps": -0.3240104019641876,
+        "yaw_change_degrees": 89.49547576904297,
+        "start_xy": [
+          0.5840518474578857,
+          0.06476959586143494
+        ],
+        "end_xy": [
+          -0.4622046947479248,
+          -0.10174094140529633
+        ]
+      }
+    },
+    {
+      "reference": "stop_turn_go",
+      "seed": 42,
+      "role": "longer_reference",
+      "kcf_qualified": true,
+      "si_qualified": false,
+      "kcf_avoids_si_contacts": false,
+      "both_avoid": true,
+      "qualified_all9": false,
+      "kcf_reverse": {
+        "start_s": 7.99,
+        "end_s": 10.83,
+        "duration_s": 2.85,
+        "mean_body_vx_mps": -0.3465949296951294,
+        "yaw_change_degrees": 31.18752670288086,
+        "start_xy": [
+          0.604306697845459,
+          -0.04677934944629669
+        ],
+        "end_xy": [
+          0.1756431609392166,
+          -1.077993392944336
+        ]
+      },
+      "si_reverse": {
+        "start_s": 8.39,
+        "end_s": 10.69,
+        "duration_s": 2.31,
+        "mean_body_vx_mps": -0.34048497676849365,
+        "yaw_change_degrees": 14.527567863464355,
+        "start_xy": [
+          0.6073381900787354,
+          -0.14403997361660004
+        ],
+        "end_xy": [
+          0.19373086094856262,
+          -0.8962568044662476
+        ]
+      }
+    }
+  ],
+  "all_source_hashes_unchanged_since_configuration_frozen": true,
+  "scope": "Configured-controller comparison. Both controllers can reverse and turn. Separate established gains/samplers mean the comparison does not isolate predictor causality. Seed 42 nominal is a discovery example, not independent validation.",
+  "figure_eight": "Earlier alpha=25 figure-eight result loses all nine tracking measures; user explicitly accepted this tradeoff. It is not reclassified as a KCF tracking win.",
+  "prediction_replay": {
+    "windows": 16,
+    "horizon_seconds": 0.6,
+    "position_windows_kcf_better": 16,
+    "heading_windows_kcf_better": 15,
+    "sampled_contact_windows": 1,
+    "scope": "Descriptive offline replay of the same measured states and executed controls. All 16 declared windows are retained, including one with sampled physical contact. This is not closed-loop causal attribution or a timing benchmark.",
+    "kcf_median_position_prediction_rmse_cm": 0.41428928077220917,
+    "kcf_median_heading_prediction_rmse_degrees": 0.4795343577861786,
+    "si_median_position_prediction_rmse_cm": 7.306496620178223,
+    "si_median_heading_prediction_rmse_degrees": 1.3521106839179993
+  }
+}

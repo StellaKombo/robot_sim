@@ -35,6 +35,8 @@ class RobotState:
     q: np.ndarray      # (nq,) base position (3), base quaternion wxyz (4), joint positions
     v: np.ndarray      # (nv,) base linear vel, world frame (3), base angular vel, body frame (3), joint vels
     prev_action: np.ndarray   # (nu,) policy action from the previous 50 Hz tick, as in its next observation
+    obstacle_position: np.ndarray | None = None  # world XYZ center, separate from robot/model state
+    obstacle_time: float | None = None  # acquisition time in the same clock as t
 
 
 def nominal_state(cfg: G1Config) -> RobotState:
@@ -112,8 +114,10 @@ def run(cmd_source: CommandSource, cfg: G1Config):
                 state_sub.poll(timeout=max(1, round(period * 1000)), flags=zmq.POLLIN)
             # newest state from the sim, if a new one arrived
             try:
-                t, q, v, prev_action = unpack_state(state_sub.recv(zmq.NOBLOCK), 7 + nu, 6 + nu, nu)
-                state = RobotState(t=t, q=q, v=v, prev_action=prev_action)
+                t, q, v, prev_action, obstacle, obstacle_time = unpack_state(
+                    state_sub.recv(zmq.NOBLOCK), 7 + nu, 6 + nu, nu, include_obstacle_time=True)
+                state = RobotState(t=t, q=q, v=v, prev_action=prev_action,
+                                   obstacle_position=obstacle, obstacle_time=obstacle_time)
 
                 # zero the controller clock at the first state, and again if sim time jumps back (restart)
                 if not have_state or t < last_t:

@@ -4,6 +4,9 @@ Run and compare KCF-MPC and single-integrator MPC on a G1 humanoid in MuJoCo,
 using the same frozen RL locomotion policy. The selected model is the epoch-3240 checkpoint, trained with the frozen
 29-DoF walking policy. The simulator uses its matching ONNX policy and MuJoCo scene
 from `deploy_robot/policy/g1/` and `deploy_robot/models/g1/`.
+The simulation includes a moving spherical obstacle, with an inverse-distance
+MPC obstacle-avoidance cost enabled by `--obstacle-avoidance`.
+Saved comparisons: [plots and videos](data/data/kcf_rich_motion_r5p5_a25/).
 
 This checkout is a simulation/testing handover, not a hardware driver or a
 hardware-qualified implementation. The active optimizer is GPU-resident iCEM;

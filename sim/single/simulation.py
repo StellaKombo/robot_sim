@@ -27,6 +27,7 @@ ROOT_DIR = os.getenv("ROBOT_SIM_ROOT_DIR",
 sys.path.insert(0, ROOT_DIR)
 from policy.actor import load_policy
 from policy.config import G1Config
+from sim.single.obstacle import DEFAULT_OBSTACLE, OBSTACLE_BODY, MocapSphere
 from utils.math_utils import gravity_from_quat, q_to_rom, v_to_rom
 from utils.zmq_utils import CMD_PORT, STATE_PORT, bind_pub, bind_sub, pack_state, unpack_twist
 
@@ -54,15 +55,16 @@ ACT_RGBA = (1.0, 0.15, 0.15, 0.8)     # actual vx, vy and wz: red
 
 # timing legend in the viewer's top-left corner, as in deploy_robot's simulation
 LEGEND_FONT = getattr(mujoco.mjtFontScale, "mjFONTSCALE_250",
-                      getattr(mujoco.mjtFontScale, "mjFONTSCALE_200", mujoco.mjtFontScale.mjFONTSCALE_150))
+                      getattr(mujoco.mjtFontScale, "mjFONTSCALE_200",
+                              mujoco.mjtFontScale.mjFONTSCALE_150))
 
 
 ############################################################################
 # MODEL
 ############################################################################
 
-def load_model(xml_path: str) -> mujoco.MjModel:
-    """Load the XML and add the world-frame triad; its geoms are massless and never collide."""
+def load_model(xml_path: str, *, obstacle: MocapSphere = DEFAULT_OBSTACLE) -> mujoco.MjModel:
+    """Load the robot, noncolliding world axes, and optional mocap sphere."""
     spec = mujoco.MjSpec.from_file(xml_path)
     body = spec.worldbody.add_body(name="world_axes")
     for fromto, rgba in (
@@ -78,6 +80,7 @@ def load_model(xml_path: str) -> mujoco.MjModel:
         g.contype = 0
         g.conaffinity = 0
         g.density = 0.0
+    obstacle.add_to(spec)
     return spec.compile()
 
 
@@ -142,7 +145,7 @@ class Simulation:
 
     def __init__(self, xml_path: str, policy_path: str, sim_dt: float, robot_cfg: G1Config = None,
                  headless: bool = False, log_name: str = None, log_hz: float = LOG_HZ,
-                 readonly_viewer: bool = False):
+                 readonly_viewer: bool = False, obstacle: MocapSphere = DEFAULT_OBSTACLE):
         # config and run options
         self.cfg = robot_cfg or G1Config()
         self.nu = len(self.cfg.Kp)
@@ -154,9 +157,12 @@ class Simulation:
         self.log_name = log_name     # run name; the log goes to data/data/<log_name>/
 
         # model and data
-        self.model = load_model(xml_path)
+        self.obstacle = obstacle
+        self.model = load_model(xml_path, obstacle=obstacle)
         self.model.opt.timestep = sim_dt
         self.data = mujoco.MjData(self.model)
+        self.obstacle_mocap_id = (int(self.model.body_mocapid[self.model.body(OBSTACLE_BODY).id])
+                                 if obstacle.enabled else None)
         
         # pelvis gyro's slot in sensordata, looked up by name
         gyro_adr = self.model.sensor("pelvis_imu_gyro_sensor").adr[0]
@@ -190,6 +196,9 @@ class Simulation:
         self.data.qpos[7:7 + self.nu] = self.cfg.default_joint_pos
         self.data.qvel[:] = 0.0
         self.data.time = 0.0
+        if self.obstacle_mocap_id is not None:
+            self.data.mocap_pos[self.obstacle_mocap_id] = self.obstacle.position
+            self.data.mocap_quat[self.obstacle_mocap_id] = [1., 0., 0., 0.]
         
         # zero command, fresh policy memory, empty log
         self.cmd = np.zeros(3, dtype=np.float32)
@@ -197,12 +206,29 @@ class Simulation:
         self.prev_action = np.zeros(self.nu, dtype=np.float32)
         self.action = self.prev_action.copy()
         self.n_steps = 0   # physics steps since reset, to pace logging
-        self.log_q, self.log_v, self.log_cmd = [], [], []
+        self.log_q, self.log_v, self.log_cmd, self.log_obstacle = [], [], [], []
         
         # recompute kinematics and sensors for the new state
         mujoco.mj_forward(self.model, self.data)
 
     # COMMAND
+
+    @property
+    def obstacle_position(self):
+        """Current world center, copied so callers cannot mutate simulation state."""
+        if self.obstacle_mocap_id is None:
+            return None
+        return self.data.mocap_pos[self.obstacle_mocap_id].copy()
+
+    def set_obstacle_position(self, position):
+        """Update the mocap sphere on the simulation thread, without advancing time."""
+        if self.obstacle_mocap_id is None:
+            raise ValueError('The mocap sphere is disabled')
+        center = np.asarray(position, dtype=float)
+        if center.shape != (3,) or not np.isfinite(center).all():
+            raise ValueError('Obstacle position must contain three finite world coordinates')
+        self.data.mocap_pos[self.obstacle_mocap_id] = center
+        mujoco.mj_forward(self.model, self.data)
 
     def set_cmd(self, cmd: np.ndarray):
         """Body-frame [vx, vy, wz], clipped to the policy's training range."""
@@ -262,6 +288,9 @@ class Simulation:
         
         # advance physics, then log the new state every log_decimation steps
         mujoco.mj_step(self.model, self.data)
+        if self.obstacle_mocap_id is not None and self.obstacle.moving:
+            # Update at the new simulation timestamp, including contacts/kinematics.
+            self.set_obstacle_position(self.obstacle.sample(self.data.time)[0])
         self.n_steps += 1
         if self.log_name is not None and self.n_steps % self.log_decimation == 0:
             self._record()
@@ -271,6 +300,8 @@ class Simulation:
         self.log_q.append(self.data.qpos.copy())
         self.log_v.append(self.data.qvel.copy())
         self.log_cmd.append(self.cmd.copy())
+        self.log_obstacle.append(np.r_[self.data.time,
+            self.obstacle_position if self.obstacle_position is not None else [np.nan] * 3])
 
     # RUN LOOP
 
@@ -303,7 +334,8 @@ class Simulation:
                     # policy tick: send the state, read the newest command, check timeout, run policy
                     if k % self.decimation == 0:
                         state_pub.send(pack_state(self.data.time, self.data.qpos, self.data.qvel,
-                                                  self.prev_action))
+                                                  self.prev_action, obstacle_position=self.obstacle_position,
+                                                  obstacle_time=(self.data.time if self.obstacle_mocap_id is not None else None)))
                         try:
                             cmd, self.ref = unpack_twist(cmd_sub.recv(zmq.NOBLOCK))
                             self.set_cmd(cmd)
@@ -453,8 +485,8 @@ class Simulation:
         key = (
             LEGEND_FONT,
             mujoco.mjtGridPos.mjGRID_TOPRIGHT,
-            "Blue arrows:\nRed arrows:\nFlat / up arrow:\nOrange ball:",
-            "commanded twist\nactual twist\nvx, vy / wz\nreference",
+            "Blue arrows:\nRed arrows:\nFlat / up arrow:\nOrange ball:\nRed ball:",
+            "commanded twist\nactual twist\nvx, vy / wz\nreference\nmocap obstacle",
         )
         viewer.set_texts([timing, key])
 
@@ -476,7 +508,7 @@ class Simulation:
         v = np.stack(self.log_v)[None].astype(np.float32)
         cmd = np.stack(self.log_cmd)[None].astype(np.float32)
         meta = dict(sim_dt=float(self.model.opt.timestep), control_dt=float(self.cfg.control_dt),
-                    log_dt=float(self.log_dt))
+                    log_dt=float(self.log_dt), obstacle_log=np.asarray(self.log_obstacle)[None])
 
         # full-order file, then reduced-order file
         np.savez(full_path, q_log=q, v_log=v, cmd_log=cmd, **meta)
@@ -497,11 +529,25 @@ def main():
                         help="save the run to data/data/NAME/ when the sim exits")
     parser.add_argument("--log_hz", type=float, default=LOG_HZ, metavar="HZ",
                         help=f"logging rate; must divide the {1.0 / SIM_DT:g} Hz sim rate (default {LOG_HZ:g})")
+    parser.add_argument('--obstacle-position', nargs=3, type=float, metavar=('X', 'Y', 'Z'),
+                        default=DEFAULT_OBSTACLE.position, help='Mocap sphere center in world metres')
+    parser.add_argument('--obstacle-radius', type=float, default=DEFAULT_OBSTACLE.radius,
+                        help='Mocap sphere radius in metres')
+    parser.add_argument('--no-obstacle', action='store_true', help='Omit the mocap sphere')
+    parser.add_argument('--obstacle-velocity', nargs=3, type=float, default=(0., 0., 0.),
+                        metavar=('VX', 'VY', 'VZ'), help='Constant world velocity in m/s')
     args = parser.parse_args()
 
     # build the sim and run until the viewer closes or Ctrl+C
     robot_cfg = G1Config()
-    sim = Simulation(XML_PATH, POLICY_PATH, SIM_DT, robot_cfg, log_name=args.log, log_hz=args.log_hz)
+    obstacle = MocapSphere(enabled=not args.no_obstacle, radius=args.obstacle_radius,
+                           position=args.obstacle_position, velocity=args.obstacle_velocity)
+    sim = Simulation(XML_PATH, POLICY_PATH,
+                     SIM_DT,
+                     robot_cfg,
+                     log_name=args.log,
+                     log_hz=args.log_hz,
+                     obstacle=obstacle)
     try:
         sim.run()
     except KeyboardInterrupt:

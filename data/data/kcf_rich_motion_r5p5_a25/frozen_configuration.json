@@ -1,0 +1,597 @@
+{
+  "objective": "Backward retreat, rotation and forward recovery during stop-turn-go obstacle avoidance; compare outcomes without assuming SI lacks reverse motion.",
+  "rho": 5.5,
+  "alpha": 25.0,
+  "horizon": 30,
+  "obstacle_speed_mps": 1.0,
+  "visible": true,
+  "tracking_exception": "User accepts inferior figure-eight tracking.",
+  "outcome_rule": "Zero obstacle contacts, positive robot-geometry clearance, no fall, completed task and 20 ms compliance.",
+  "maneuver_definition": "Measured body vx below -0.05 m/s for >=0.25 s overlapping encounter[-2,+4]; report unwrapped yaw change and subsequent body vx above +0.05 m/s for >=0.25 s.",
+  "scope": "Configured-controller comparison: KCF and SI retain their established separate gains and sampling. This does not isolate predictor causality.",
+  "scenarios": [
+    {
+      "case": {
+        "case": "stopgo90",
+        "mode": "stop_turn_go",
+        "duration": 30.0,
+        "encounter": 7.98249594867,
+        "reference_overrides": {
+          "stop_turn_go_reference": {
+            "start_pose": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "speed": 0.3,
+            "distance": 0.6,
+            "yaw_rate": 0.85,
+            "dwell_seconds": 0.5,
+            "turn_angles": [
+              1.5707963267948966
+            ]
+          }
+        },
+        "target": null,
+        "initial_xy": [
+          0.0,
+          0.0
+        ],
+        "initial_yaw": 0.0,
+        "obstacle": {
+          "radius": 0.07,
+          "position": [
+            -0.5288954032197398,
+            7.902267822538179,
+            0.15
+          ],
+          "velocity": [
+            0.1414213562373095,
+            -0.9899494936611665,
+            0.0
+          ]
+        },
+        "turn_window": [
+          5.98249594867,
+          9.98249594867
+        ]
+      },
+      "seed": 42,
+      "role": "discovery"
+    },
+    {
+      "case": {
+        "case": "stopgo90",
+        "mode": "stop_turn_go",
+        "duration": 30.0,
+        "encounter": 7.98249594867,
+        "reference_overrides": {
+          "stop_turn_go_reference": {
+            "start_pose": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "speed": 0.3,
+            "distance": 0.6,
+            "yaw_rate": 0.85,
+            "dwell_seconds": 0.5,
+            "turn_angles": [
+              1.5707963267948966
+            ]
+          }
+        },
+        "target": null,
+        "initial_xy": [
+          0.0,
+          0.0
+        ],
+        "initial_yaw": 0.0,
+        "obstacle": {
+          "radius": 0.07,
+          "position": [
+            -0.5288954032197398,
+            7.902267822538179,
+            0.15
+          ],
+          "velocity": [
+            0.1414213562373095,
+            -0.9899494936611665,
+            0.0
+          ]
+        },
+        "turn_window": [
+          5.98249594867,
+          9.98249594867
+        ]
+      },
+      "seed": 314159,
+      "role": "fresh_seed"
+    },
+    {
+      "case": {
+        "case": "stopgo90",
+        "mode": "stop_turn_go",
+        "duration": 30.0,
+        "encounter": 7.98249594867,
+        "reference_overrides": {
+          "stop_turn_go_reference": {
+            "start_pose": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "speed": 0.3,
+            "distance": 0.6,
+            "yaw_rate": 0.85,
+            "dwell_seconds": 0.5,
+            "turn_angles": [
+              1.5707963267948966
+            ]
+          }
+        },
+        "target": null,
+        "initial_xy": [
+          0.0,
+          0.0
+        ],
+        "initial_yaw": 0.0,
+        "obstacle": {
+          "radius": 0.07,
+          "position": [
+            -0.5288954032197398,
+            7.902267822538179,
+            0.15
+          ],
+          "velocity": [
+            0.1414213562373095,
+            -0.9899494936611665,
+            0.0
+          ]
+        },
+        "turn_window": [
+          5.98249594867,
+          9.98249594867
+        ]
+      },
+      "seed": 271828,
+      "role": "fresh_seed"
+    },
+    {
+      "case": {
+        "case": "stopgo90_cross_a",
+        "mode": "stop_turn_go",
+        "duration": 30.0,
+        "encounter": 7.98249594867,
+        "reference_overrides": {
+          "stop_turn_go_reference": {
+            "start_pose": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "speed": 0.3,
+            "distance": 0.6,
+            "yaw_rate": 0.85,
+            "dwell_seconds": 0.5,
+            "turn_angles": [
+              1.5707963267948966
+            ]
+          }
+        },
+        "target": null,
+        "initial_xy": [
+          0.0,
+          0.0
+        ],
+        "initial_yaw": 0.0,
+        "obstacle": {
+          "radius": 0.07,
+          "position": [
+            -4.189497569202,
+            6.385996758936,
+            0.15
+          ],
+          "velocity": [
+            0.6,
+            -0.8,
+            0.0
+          ]
+        },
+        "turn_window": [
+          5.98249594867,
+          9.98249594867
+        ]
+      },
+      "seed": 314159,
+      "role": "fresh_direction"
+    },
+    {
+      "case": {
+        "case": "stopgo90_cross_b",
+        "mode": "stop_turn_go",
+        "duration": 30.0,
+        "encounter": 7.98249594867,
+        "reference_overrides": {
+          "stop_turn_go_reference": {
+            "start_pose": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "speed": 0.3,
+            "distance": 0.6,
+            "yaw_rate": 0.85,
+            "dwell_seconds": 0.5,
+            "turn_angles": [
+              1.5707963267948966
+            ]
+          }
+        },
+        "target": null,
+        "initial_xy": [
+          0.0,
+          0.0
+        ],
+        "initial_yaw": 0.0,
+        "obstacle": {
+          "radius": 0.07,
+          "position": [
+            5.389497569201999,
+            -6.385996758936,
+            0.15
+          ],
+          "velocity": [
+            -0.6,
+            0.8,
+            0.0
+          ]
+        },
+        "turn_window": [
+          5.98249594867,
+          9.98249594867
+        ]
+      },
+      "seed": 314159,
+      "role": "fresh_direction"
+    },
+    {
+      "case": {
+        "case": "stop_turn_go",
+        "mode": "stop_turn_go",
+        "duration": 55.63495408493621,
+        "encounter": 9.0,
+        "reference_overrides": {},
+        "target": null,
+        "initial_xy": [
+          0.0,
+          0.0
+        ],
+        "initial_yaw": 0.0,
+        "obstacle": {
+          "radius": 0.07,
+          "position": [
+            -0.6727922061357855,
+            8.909545442950499,
+            0.15
+          ],
+          "velocity": [
+            0.1414213562373095,
+            -0.9899494936611665,
+            0.0
+          ]
+        },
+        "turn_window": [
+          7.0,
+          11.0
+        ]
+      },
+      "seed": 42,
+      "role": "longer_reference"
+    }
+  ],
+  "frozen_settings": {
+    "kcf": {
+      "horizon": 30,
+      "state_weights": [
+        400.0,
+        400.0,
+        180.0,
+        180.0,
+        5.0,
+        5.0,
+        5.0,
+        100.0,
+        100.0,
+        20.0
+      ],
+      "terminal_state_weights": [
+        1200.0,
+        1200.0,
+        1800.0,
+        1800.0,
+        10.0,
+        10.0,
+        15.0,
+        300.0,
+        300.0,
+        60.0
+      ],
+      "input_weight": 0.2,
+      "command_change_weights": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "input_lower_bounds": [
+        -0.459801,
+        -0.462779,
+        -0.944198
+      ],
+      "input_upper_bounds": [
+        0.487012,
+        0.461249,
+        0.955684
+      ],
+      "icem": {
+        "population": 32,
+        "iterations": 1,
+        "elites": 2,
+        "decay": 2.0,
+        "noise_beta": 3.0,
+        "initial_std": 0.25,
+        "warm_std": 0.1,
+        "reference_initialization": true,
+        "momentum": 0.1,
+        "reuse_fraction": 0.3,
+        "command_rate_limits": [
+          1.5,
+          1.5,
+          2.0
+        ]
+      },
+      "prediction_sample_period": 0.02,
+      "live_command_deadline": 0.02,
+      "standing_hold": {
+        "enter_position_m": 0.025,
+        "exit_position_m": 0.045,
+        "enter_heading_rad": 0.03490658503988659,
+        "exit_heading_rad": 0.05235987755982989,
+        "enter_linear_speed_mps": 0.1,
+        "enter_yaw_rate_rps": 0.2,
+        "settle_seconds": 0.02,
+        "heading_gain": 1.5,
+        "yaw_rate_damping": 0.2,
+        "obstacle_distance_m": 1.5
+      },
+      "command_application_lead_steps": 1,
+      "live_handover": {
+        "initial_steps": 2,
+        "minimum_steps": 2,
+        "maximum_steps": 8,
+        "latency_window": 8,
+        "margin_seconds": 0.002
+      },
+      "obstacle_cost": {
+        "enabled": true,
+        "factory": "KCF_MPC.mpc.obstacle_cost:InverseDistanceCost",
+        "parameters": {
+          "rho": 5.5,
+          "alpha": 25.0
+        }
+      }
+    },
+    "si": {
+      "horizon": 30,
+      "state_weights": [
+        150.0,
+        150.0,
+        80.0,
+        80.0,
+        20.0,
+        20.0,
+        5.0,
+        100.0,
+        100.0,
+        20.0
+      ],
+      "terminal_state_weights": [
+        450.0,
+        450.0,
+        600.0,
+        600.0,
+        50.0,
+        50.0,
+        10.0,
+        300.0,
+        300.0,
+        60.0
+      ],
+      "input_weight": 0.2,
+      "command_change_weights": [
+        10.0,
+        10.0,
+        10.0
+      ],
+      "input_lower_bounds": [
+        -0.459801,
+        -0.462779,
+        -0.944198
+      ],
+      "input_upper_bounds": [
+        0.487012,
+        0.461249,
+        0.955684
+      ],
+      "icem": {
+        "population": 42,
+        "iterations": 2,
+        "elites": 10,
+        "decay": 6.0,
+        "noise_beta": 3.0,
+        "initial_std": 0.25,
+        "warm_std": 0.1,
+        "reference_initialization": true,
+        "momentum": 0.1,
+        "reuse_fraction": 0.3,
+        "command_rate_limits": [
+          1.5,
+          1.5,
+          2.0
+        ]
+      },
+      "prediction_sample_period": 0.02,
+      "live_command_deadline": 0.02,
+      "standing_hold": {
+        "enter_position_m": 0.025,
+        "exit_position_m": 0.045,
+        "enter_heading_rad": 0.03490658503988659,
+        "exit_heading_rad": 0.05235987755982989,
+        "enter_linear_speed_mps": 0.1,
+        "enter_yaw_rate_rps": 0.2,
+        "settle_seconds": 0.02,
+        "heading_gain": 1.5,
+        "yaw_rate_damping": 0.2,
+        "obstacle_distance_m": 1.5
+      },
+      "command_application_lead_steps": 1,
+      "live_handover": {
+        "initial_steps": 2,
+        "minimum_steps": 2,
+        "maximum_steps": 8,
+        "latency_window": 8,
+        "margin_seconds": 0.002
+      },
+      "obstacle_cost": {
+        "enabled": true,
+        "factory": "KCF_MPC.mpc.obstacle_cost:InverseDistanceCost",
+        "parameters": {
+          "rho": 5.5,
+          "alpha": 25.0
+        }
+      }
+    }
+  },
+  "source_hashes": {
+    ".gitignore": "f7a6b3f31bed44288dd9297270952f607669b89ca36bf2f2eed2aa3b994a5b18",
+    ".gitmodules": "5a1f7229e0851a3062e8736ae69b98d22262590c65026afdf5fb896da01a6403",
+    "KCF_MPC/.gitattributes": "b47fb1e08eaad1b9bea4ca3a5d5eda76cedc696d4c33fffc2229400c7d8287f9",
+    "KCF_MPC/.gitignore": "f8b525200a06a688e785d628c2f13b858e143848e20a28721f912ce0151cfdd8",
+    "KCF_MPC/README.md": "52285e2d96c882fa151a2629ce3ef21bcb8d95baced49cbe2fcc8b2b7801f5b7",
+    "KCF_MPC/config/__init__.py": "32194af7cddcd8956f4b663f957a220eb574e913667b42032ec915f33a6750cb",
+    "KCF_MPC/config/model_config.py": "68e0173881ee4807e3e5a938a67fb5cde41a365c28785e1f90eb34a7e79ec7d1",
+    "KCF_MPC/config/mpc_config.py": "9e7ab543e974bae12a9242412ab18aa6e604eedc83b764c1f1107ffeac316fd8",
+    "KCF_MPC/docs/HANDOVER.md": "19dfe90830b47e7bcb9d623b0776d9fe7732c963a3d10b1ee5b1c7d3666bb3eb",
+    "KCF_MPC/docs/cleanup_verification.md": "75bc5f2f2d8215e9669e1e1381a85c71d28e49d3964395c9aad4472801ad19fd",
+    "KCF_MPC/docs/finetuning_summary.md": "4af6a49cabfa2060f7909e1234840cff9276639f01f4b93c9583083f8165cbf0",
+    "KCF_MPC/docs/mpc_method_decision.md": "2d76d3016b8b42af09b04e16f164778cc9cbe537ad3dd18972815b429ad8e4b8",
+    "KCF_MPC/docs/stand_walk_boundary.md": "6303c055d8fea0c982199e100379349986d14251dfefbecdea79f7ebb9fa2480",
+    "KCF_MPC/models/__init__.py": "39f853cff8c2a15cc2fe331295efd943ce48828c8f758fefa8a62efebca801db",
+    "KCF_MPC/models/kinematics.py": "e76630d60357e74375245c7f7a200d5e78de2f02bf523eca6418519abd974b0e",
+    "KCF_MPC/models/layers.py": "fd03231873a6ee410c846fe76ae2eedaadd6277c62c6814567a7c8775388b03e",
+    "KCF_MPC/models/lifting.py": "571ec59c53a7027179f664d6536503506245641034dc9f2c9843fcc3d53cee75",
+    "KCF_MPC/models/model.py": "b810702a59b0955ae1e35f61318c2e3c5eea9aab09d67e3ca258f5dc9c5aa503",
+    "KCF_MPC/models/normalization.py": "d00de04d211c460a2bcdb6271bd5ac55829910768520ab9899172eed4bdbcd19",
+    "KCF_MPC/models/projected.py": "80b2dbc9e713d57bdea4ff060dd4c156e1ee1d35c6e9b8356fcd350e699ca66c",
+    "KCF_MPC/models/transition.py": "8ab437f0d998d9a99e0fd4a0e35f1fbdfe52c72fcc33846e92f41bff94242019",
+    "KCF_MPC/mpc/icem.py": "de3c83d8c62f41e5e265d02dcac52f1b4ef8bf9f087392cbd764aa65bb3683aa",
+    "KCF_MPC/mpc/jax_networks.py": "e7b05e53802f42bd09a518ffb62518bea2470f053c06eb51524483cbd2a9373a",
+    "KCF_MPC/mpc/mpc.py": "eab8754d9959c5383811a75f1d9c9b52d30d7f640d12728c6564194448cf46d3",
+    "KCF_MPC/mpc/mpc_buffered.py": "911f022d059b5a8ad124d65fb6c787115b6d0276bd6500b6fc14ce0f26f5d27f",
+    "KCF_MPC/mpc/mpc_handover.py": "2c633e200e67247d0c397a8328fe5a6aadbbbf198cb80bc5f356cc06a6ac6446",
+    "KCF_MPC/mpc/mpc_runtime.py": "59eeea84a5228a99f47893902808948c5faa4220c42b898fb5a93e3246248afa",
+    "KCF_MPC/mpc/mpc_trace.py": "aaa9f2704330f22f616a7cafae31ba8ebbe05c5174feadab24f7435ed32e073b",
+    "KCF_MPC/mpc/native/__init__.py": "0fea3a0618524d87452669dfbb190aa0c6f96caded54a87291952972ee53e9e8",
+    "KCF_MPC/mpc/native/batch.cu": "52ab786ad45dc7303f803dd078ea86bcd2078d6366eb61b17a1cabce3a460f1f",
+    "KCF_MPC/mpc/native/projection.cuh": "ea0c5731a3d85ccb9daee50faa49102205c9a944eb2cb5cc9c0b293d3b7b0814",
+    "KCF_MPC/mpc/native/projection_rounding.cuh": "838bc1902b74fb89d6ba0fe8c165822a89b36583b1e2740b52a75ce590c95b46",
+    "KCF_MPC/mpc/native/rollout.cu": "80d9a4f82f0f6f1fede768e9e73cf81edc50ede7788896e4468c43b3296d817b",
+    "KCF_MPC/mpc/native/rollout_ffi.cc": "a19d4e490a66bf8d55762cc5b84de0caeb36f0e4f7550b59cc35e33d25b8a24a",
+    "KCF_MPC/mpc/native/runtime.py": "e5e7926501f6fb428e8a33abaec934a67a2bc3550c4c17cb70d0b7931b6336d8",
+    "KCF_MPC/mpc/obstacle_cost.py": "50036fb145708fadabeb67fdb02ea4d251f3531546d9265dda328013ada64d20",
+    "KCF_MPC/mpc/projected_jax.py": "3b674e7e615b39e53b2eddf6010194de72c5ca3f02aa1daa4ff601d0c957fd7c",
+    "KCF_MPC/mpc/single_integrator.py": "9e34877518d4cddc6803bf153a7bb2f42f9f8b2e8afc34caf33f6b03c716570e",
+    "KCF_MPC/mpc/tracking.py": "fbdbd62b1860c6810653e6eb3efd069a9440550b40c1d00e5707cdd4aaf536c6",
+    "KCF_MPC/requirements-dev.txt": "42aae39d9729c234ea1bdd3be65915c74545acbdda6ad48834dcee4574754d0d",
+    "KCF_MPC/requirements.txt": "2fbc2ef6445efc4d0be73635f69d73c6a9325f4d81711297aa93c2016ee4be58",
+    "KCF_MPC/results/g1_kcf_handoff_epoch01540/config.json": "708568e23aa8277b48e9986785015f5a067130e83c99b03a169a5322220f9a19",
+    "KCF_MPC/results/g1_kcf_handoff_epoch01540/data_metadata.json": "d101aca2656fe568f7c71a34f77a856456196100a77a09fdac97014904782598",
+    "KCF_MPC/results/g1_kcf_handoff_epoch01540/model_final.pt": "64142fd8a8d4d79faab3b4a20d6189b89e99e5c10d13dba623e8d72fa7f4645d",
+    "KCF_MPC/results/g1_kcf_handoff_epoch01540/model_selection.json": "0e00356ec6c6f71def62bd0bb839acb573e094792d052aec73d2c3f4cdd5e90b",
+    "KCF_MPC/results/g1_kcf_handoff_epoch01540/normalization.npz": "15f455d356d1daa075c85093b3a16f0c058591d64a55000240ccdc1e842472a2",
+    "KCF_MPC/results/g1_kcf_handoff_epoch03240/config.json": "e6ab9f829105a0e8d60980b3e7a6661cdcf34e69a9408e91776fb862c6807e6b",
+    "KCF_MPC/results/g1_kcf_handoff_epoch03240/data_metadata.json": "c36852859742bbd80f913e43aa250c24a92987a78567afe5255465b51fea967d",
+    "KCF_MPC/results/g1_kcf_handoff_epoch03240/model_final.pt": "2734a056f563d7b7232d68510a3c16651dca408c7c5121f73a214bab08d93ee3",
+    "KCF_MPC/results/g1_kcf_handoff_epoch03240/normalization.npz": "dec9c28caedbd8df34e8d5c9509cf9bd9ec70047062b9050defc17e0ecd0572c",
+    "KCF_MPC/scripts/README.md": "ecc824ba1827cf8e85afb041a7abd98e6c6cb56dc623e6557b3b84100bd6f4fb",
+    "KCF_MPC/scripts/benchmark_runtime.py": "c3a7ae7caaabdc8ff13163e352412e2239e7bf1fed24d7c99b3aca676c191be5",
+    "KCF_MPC/scripts/headless_validation.py": "19b483d36c713c70f4da919e0152653c65dbd7c2fda143a24e98af3b0fe0b972",
+    "KCF_MPC/scripts/replay_live.py": "2addc00a28e27819c1c995303461d8c3ea41a67457380db93cc22edb1d82e6b4",
+    "KCF_MPC/scripts/trial_config.py": "d05248d92e4dbbcd37c7c806abdb288e771495ea22107c7ad6308c7e982775cd",
+    "KCF_MPC/scripts/visual_recovery_trial.py": "bd446eda4cf7b2c0f8403557946ed803a0e2b8a550f29f6f092fc9478c30b8c7",
+    "KCF_MPC/util/__init__.py": "bb4607371bc46f8a9f34ac7ecf2b9a3725ffd12eb59899d2fc187f6bfa9aba33",
+    "KCF_MPC/util/experiment_util.py": "3186dbfcd995f739c8b5e767455078b61c3799407354768ec0f631dcbd2032c4",
+    "KCF_MPC/util/utils.py": "5d933d03cdf4ce39e880542ada9598dad12144e5bd6da1693701f4557e8baa03",
+    "Makefile": "b7992d03a012f5ca37fd7574d1647d805928cc3cb4661f4a44d7d8abd2de4c55",
+    "README.md": "e7c29efbbcaaee610b8009f9e032ab298d2aa8b0bddd7e1a52fb7758f5c06987",
+    "data/compare_hardware_tracking.py": "9446ca49a0053672e8876a483a4468cfbbdbd60820c7c6ba0e987e9caf464c3a",
+    "data/compare_rom_data.py": "13aa0a1126034bbd783055869426e8a327f04630ab9dde9b7cdc0ef83cfd7ed5",
+    "data/plot_23dof_data.py": "91a56518d1b9d1a090086d98926302de3654b8b482a501faa17d501629c1fddc",
+    "data/plot_policy_actions.py": "0a269a0bfaadd73e0e3e28b14a756114547f1577b8e62eccab4f5736dac2cfb7",
+    "data/plot_rom_data.py": "b029917378eb29159d5f33ae002d22b5e087e7ae3217b80e3689a9f3f01101a4",
+    "deploy_robot/models/g1/g1_29dof_mode11.xml": "8ce57a6a846eacc1937cfcca1bad733f045ce3bf2d4fefe0955d10ffb66933a5",
+    "deploy_robot/models/g1/g1_29dof_mode11_scene.xml": "593866d46223feaf4768a7fa91385c9653927473e489f5b46a8adfe303746377",
+    "deploy_robot/policy/g1/g1_29dof_vel.onnx": "5b1aa771cf03b463ff5d477d9b8e19bbf8232d07d901b68f63b059edbdddcc15",
+    "deploy_robot/utils/policy.py": "c1a6aebca5700d59e85649d0bb292f89345ac757dc49ae2f5ba9c00016e1d36b",
+    "environment.yml": "833ac57dfd9d9c9d291eeb3d7eb2eb272dd0246a57b8bdd8b210b1fcf6905ae7",
+    "models/g1_23dof.xml": "16245b57d6e20c5a1700c4dffedf4ebe1037bb592924d90b22849e1f85707163",
+    "models/meshes/head_link.STL": "005fb67fbd3eff94aa8bf4a6e83238174e9f91b6721f7111594322f223724411",
+    "models/meshes/left_ankle_pitch_link.STL": "d49e3abc6f5b12e532062cd575b87b5ef40cd2a3fc18f54a1ca5bba4f773d51d",
+    "models/meshes/left_ankle_roll_link.STL": "c4092af943141d4d9f74232f3cfa345afc6565f46a077793b8ae0e68b39dc33f",
+    "models/meshes/left_elbow_link.STL": "fa752198accd104d5c4c3a01382e45165b944fbbc5acce085059223324e5bed3",
+    "models/meshes/left_hip_pitch_link.STL": "4725168105ee768ee31638ef22b53f6be2d7641bfd7cfefe803488d884776fa4",
+    "models/meshes/left_hip_roll_link.STL": "91f25922ee8a7c3152790051bebad17b4d9cd243569c38fe340285ff93a97acf",
+    "models/meshes/left_hip_yaw_link.STL": "a16d88aa6ddac8083aa7ad55ed317bea44b1fa003d314fba88965b7ed0f3b55b",
+    "models/meshes/left_knee_link.STL": "8d92b9e3d3a636761150bb8025e32514c4602b91c7028d523ee42b3e632de477",
+    "models/meshes/left_shoulder_pitch_link.STL": "f0d1cfd02fcf0d42f95e678eeca33da3afbcc366ffba5c052847773ec4f31d52",
+    "models/meshes/left_shoulder_roll_link.STL": "fb9df21687773522598dc384f1a2945c7519f11cbc8bd372a49170316d6eee88",
+    "models/meshes/left_shoulder_yaw_link.STL": "1aa97e9748e924336567992181f78c7cd0652fd52a4afcca3df6b2ef6f9e712e",
+    "models/meshes/left_wrist_roll_rubber_hand.STL": "e81030abd023bd9e4a308ef376d814a2c12d684d8a7670c335bbd5cd7809c909",
+    "models/meshes/logo_link.STL": "8571a0a19bc4916fa55f91449f51d5fdefd751000054865a842449429d5f155b",
+    "models/meshes/pelvis.STL": "5ba6bbc888e630550140d3c26763f10206da8c8bd30ed886b8ede41c61f57a31",
+    "models/meshes/pelvis_contour_link.STL": "5cc5c2c7a312329e3feeb2b03d3fc09fc29705bd01864f6767e51be959662420",
+    "models/meshes/right_ankle_pitch_link.STL": "15be426539ec1be70246d4d82a168806db64a41301af8b35c197a33348c787a9",
+    "models/meshes/right_ankle_roll_link.STL": "4b66222ea56653e627711b56d0a8949b4920da5df091da0ceb343f54e884e3a5",
+    "models/meshes/right_elbow_link.STL": "1be925d7aa268bb8fddf5362b9173066890c7d32092c05638608126e59d1e2ab",
+    "models/meshes/right_hip_pitch_link.STL": "e4f3c99d7f4a7d34eadbef9461fc66e3486cb5442db1ec50c86317d459f1a9c6",
+    "models/meshes/right_hip_roll_link.STL": "4c254ef66a356f492947f360dd931965477b631e3fcc841f91ccc46d945d54f6",
+    "models/meshes/right_hip_yaw_link.STL": "e479c2936ca2057e9eb2f7dff6c189b7419d7b8484dea0b298cbb36a2a6aa668",
+    "models/meshes/right_knee_link.STL": "63c4008449c9bbe701a6e2b557b7a252e90cf3a5abcf54cee46862b9a69f8ec8",
+    "models/meshes/right_shoulder_pitch_link.STL": "24cdb387e0128dfe602770a81c56cdce3a0181d34d039a11d1aaf8819b7b8c02",
+    "models/meshes/right_shoulder_roll_link.STL": "962b97c48f9ce9e8399f45dd9522e0865d19aa9fd299406b2d475a8fc4a53e81",
+    "models/meshes/right_shoulder_yaw_link.STL": "a0b76489271da0c72461a344c9ffb0f0c6e64f019ea5014c1624886c442a2fe5",
+    "models/meshes/right_wrist_roll_rubber_hand.STL": "0729aff1ac4356f9314de13a46906267642e58bc47f0d8a7f17f6590a6242ccf",
+    "models/meshes/torso_link_rev_1_0.STL": "11ddb46f2098efbbd8816b1d65893632d8e78be936376c7cdcd6771899ccc723",
+    "models/meshes/waist_roll_link_rev_1_0.STL": "b67c347a05abc3e8ddae600d98a082bee273bb39f8e651647708b0a7140a8a97",
+    "models/meshes/waist_yaw_link_rev_1_0.STL": "ec6db442b11f25eed898b5add07940c85d804f300de24dcbd264ccd8be7d554c",
+    "policy/actor.py": "e5ad8550c7fe68eb4495161bc105412b4716e7cdfec4007e6ee1fe5b5dbd6e1a",
+    "policy/config.py": "158e8c1872608dbf901c8f1666f09c593b5fa837a75e8119d97132d6ddbd0192",
+    "policy/g1_23dof_vel.pt": "c844c037ddac379925ba2bcb158f8c20f00e21139d4b5f5c93a8df658fe2100e",
+    "pytest.ini": "fe5e9f4eb48bbe38cf7526b3ee5cf5593aa523f6a8d94c0065ec5da41a3fcc72",
+    "requirements-dev.txt": "53673e285181e1030f67b702c16afbd757e1d799464c13b451dcd68c5733c63a",
+    "sim/single/control_base.py": "cd5f11ea48ad4f63a35815f0236f02e55b72d1fe72cf8b9d208a4d31047a0fcc",
+    "sim/single/control_custom.py": "92aa09e5775192a76a0af97dddd7b402a5cdba61307f2f26492a8def2c08bec3",
+    "sim/single/control_joy.py": "ed5e11cf73498351d4b4071f56191989f529583d760e2dbf8c60acdbbbc555a9",
+    "sim/single/control_kb.py": "62b7bf92eea7d32bf9592333d4cb45dac33247da6b9c6e9d001d3ca0c172d55e",
+    "sim/single/obstacle.py": "69bfc05b78cb5897cee5462afaaf7976b850b372b68022f9f7dd28481680487d",
+    "sim/single/simulation.py": "70d40c9edd644c44c7c225f560e464632ab49ce8c26cdb4c4aea98235373cfb1",
+    "utils/g1_kcf_state.py": "9fd9d79c7c0d1ceb87ed00add8210d9883f2f74bece0fd24e6df6b4669890267",
+    "utils/g1_kcf_state_frame.py": "a718742df131c454dbc7debc39dd48dd0d75f934116a4556a43afadc2e5ba494",
+    "utils/joystick_utils.py": "8c8ea5ba9cf4fad4cd9660ce90b08f94d5e016a9834b7732a369a765c87293e5",
+    "utils/kcf_controller.py": "8cfde90f838e3ad509cc6b6b17429ceb91f93dbefc30cb0e061feee01f1e0569",
+    "utils/kcf_reference.py": "b1d73a6fa4fbf0e67639c35e8657a205bf6ee45a0c06dd6a1976db27a012c036",
+    "utils/math_utils.py": "24ae770b7c161add23099f2aa8cf9d7f71ed9f77bffd7bee71ec0eafce80221e",
+    "utils/relative_frame.py": "281fdc2b09e9f6a1476f68456f6d83e7dcdb031f361a5c851b1a4219ab73f699",
+    "utils/zmq_utils.py": "406e178ae2417a1d32a2498488fd8415bcca894855a761f1d3ffce8cb92818bf"
+  }
+}

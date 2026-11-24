@@ -37,18 +37,42 @@ def unpack_twist(buf: bytes):
     return a[:3].astype(np.float32), ref
 
 
-def pack_state(t: float, qpos, qvel, prev_action) -> bytes:
-    """Sim time, full qpos, full qvel, and the policy's previous action as raw float64s."""
-    return np.concatenate([[t], qpos, qvel, prev_action]).astype(np.float64).tobytes()
+def pack_state(t: float, qpos, qvel, prev_action, *, obstacle_position=None, obstacle_time=None) -> bytes:
+    """Optional world XYZ and measurement time, in the same clock as robot time."""
+    values = [[t], qpos, qvel, prev_action]
+    if obstacle_position is not None:
+        center = np.asarray(obstacle_position, dtype=float)
+        if center.shape != (3,) or not np.isfinite(center).all():
+            raise ValueError('Obstacle position must contain three finite world coordinates')
+        values.append(center)
+        if obstacle_time is not None:
+            if not np.isfinite(obstacle_time):
+                raise ValueError('Obstacle measurement time must be finite')
+            values.append([obstacle_time])
+    elif obstacle_time is not None:
+        raise ValueError('Obstacle time requires an obstacle position')
+    return np.concatenate(values).astype(np.float64).tobytes()
 
 
-def unpack_state(buf: bytes, nq: int, nv: int, nu: int):
-    """Inverse of `pack_state`: (t, qpos, qvel, prev_action)."""
+def unpack_state(buf: bytes, nq: int, nv: int, nu: int, *, include_obstacle=False,
+                 include_obstacle_time=False):
+    """Keep legacy four/five-value interfaces; timestamps opt into six values."""
     # reject anything that doesn't match this robot's sizes
     a = np.frombuffer(buf, dtype=np.float64)
-    if a.size != 1 + nq + nv + nu:
-        raise ValueError(f"state message has {a.size} floats, expected {1 + nq + nv + nu}.")
-    return float(a[0]), a[1:1 + nq].copy(), a[1 + nq:1 + nq + nv].copy(), a[1 + nq + nv:].copy()
+    size = 1 + nq + nv + nu
+    if a.size not in (size, size + 3, size + 4):
+        raise ValueError(f"state message has {a.size} floats, expected {size}, {size + 3} or {size + 4}.")
+    obstacle = a[size:size + 3].copy() if a.size > size else None
+    stamp = float(a[-1] if a.size == size + 4 else a[0]) if obstacle is not None else None
+    if obstacle is not None and not np.isfinite(obstacle).all():
+        raise ValueError('Obstacle position must contain three finite world coordinates')
+    if stamp is not None and not np.isfinite(stamp):
+        raise ValueError('Obstacle measurement time must be finite')
+    state = (float(a[0]), a[1:1 + nq].copy(), a[1 + nq:1 + nq + nv].copy(),
+             a[1 + nq + nv:size].copy())
+    if include_obstacle_time:
+        return (*state, obstacle, stamp)
+    return (*state, obstacle) if include_obstacle else state
 
 
 ############################################################################
