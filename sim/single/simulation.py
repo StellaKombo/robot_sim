@@ -16,7 +16,6 @@ import time
 
 # third-party imports
 import numpy as np
-import torch
 import mujoco
 import mujoco.viewer
 import zmq
@@ -25,14 +24,14 @@ import zmq
 ROOT_DIR = os.getenv("ROBOT_SIM_ROOT_DIR",
                      os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, ROOT_DIR)
-from policy.actor import load_policy
-from policy.config import G1Config
+from policy.actor import load_policy, GaitClock
+from policy.config import G1Config, POLICY_PATH as RUN_POLICY_PATH, project_command, policy_metadata
 from utils.math_utils import gravity_from_quat, q_to_rom, v_to_rom
 from utils.zmq_utils import CMD_PORT, STATE_PORT, bind_pub, bind_sub, pack_state, unpack_twist
 
 # GLOBAL VARIABLES
 XML_PATH = os.path.join(ROOT_DIR, "deploy_robot", "models", "g1", "g1_29dof_mode11_scene.xml")
-POLICY_PATH = os.path.join(ROOT_DIR, "deploy_robot", "policy", "g1", "g1_29dof_vel.onnx")
+POLICY_PATH = str(RUN_POLICY_PATH)
 SIM_DT = 0.002      # [s] physics timestep
 LOG_HZ = 100.0      # [Hz] default logging rate; must divide the sim rate exactly
 RENDER_HZ = 50.0    # [Hz] visual rendering frequency
@@ -78,6 +77,11 @@ def load_model(xml_path: str) -> mujoco.MjModel:
         g.contype = 0
         g.conaffinity = 0
         g.density = 0.0
+    # Match the running-policy backpack without another XML file.
+    backpack = spec.body("torso_link").add_body(name="backpack_link", pos=[-.0965, 0., .1775])
+    backpack.add_geom(name="backpack_collision", type=mujoco.mjtGeom.mjGEOM_BOX,
+                      size=[.0275, .0575, .06], mass=1.4, condim=3,
+                      rgba=[.12, .12, .12, 1.])
     return spec.compile()
 
 
@@ -178,8 +182,16 @@ class Simulation:
 
         # policy
         self.policy = load_policy(policy_path)
+        joint_names = policy_metadata()["joint_names"].split(",")
+        actual = [self.model.joint(int(index)).name for index in self.model.actuator_trnid[:, 0]]
+        if actual != joint_names or self.model.nq != 36 or self.model.nv != 35:
+            raise ValueError("Running policy and MuJoCo must share the exact 29-joint order")
+        if (len(self.policy.get_inputs()) != 1 or self.policy.get_inputs()[0].shape != [1, 98]
+                or self.policy.get_outputs()[0].shape != [1, 29]):
+            raise ValueError("Running actor must map one 98-state observation to 29 actions")
         self.cmd_scale = np.asarray(self.cfg.cmd_scale, dtype=np.float32)
         self.default_j = np.asarray(self.cfg.default_joint_pos, dtype=np.float32)
+        self.clock = GaitClock()
         self.reset()
 
     def reset(self):
@@ -192,6 +204,7 @@ class Simulation:
         self.data.time = 0.0
         
         # zero command, fresh policy memory, empty log
+        self.clock.reset()
         self.cmd = np.zeros(3, dtype=np.float32)
         self.ref = None   # controller's reference point [x, y], drawn when set
         self.prev_action = np.zeros(self.nu, dtype=np.float32)
@@ -205,8 +218,8 @@ class Simulation:
     # COMMAND
 
     def set_cmd(self, cmd: np.ndarray):
-        """Body-frame [vx, vy, wz], clipped to the policy's training range."""
-        self.cmd = np.clip(np.asarray(cmd, dtype=np.float32), -self.cmd_scale, self.cmd_scale)
+        """Body-frame command projected onto the audited running command bands."""
+        self.cmd = project_command(cmd)
 
     # POLICY
 
@@ -221,29 +234,19 @@ class Simulation:
         qpos_j = d.qpos[7:7 + self.nu].astype(np.float32)
         qvel_j = d.qvel[6:6 + self.nu].astype(np.float32)
 
-        # gait clock from sim time, zeroed below stand_cmd_threshold
-        phase = (d.time % self.cfg.gait_period) / self.cfg.gait_period
-        gait_phase = np.array([math.sin(2.0 * math.pi * phase), math.cos(2.0 * math.pi * phase)],
-                              dtype=np.float32)
-        if np.linalg.norm(self.cmd) < self.cfg.stand_cmd_threshold:
-            gait_phase[:] = 0.0
-
-        # assemble in the order the policy was trained on
+        gait_phase = self.clock.update(self.cmd)
+        # ONNX order: gyro, relative q, dq, previous action, twist, phase, gravity.
         obs = np.concatenate([
-            omega,                      # 0:3
-            gravity,                    # 3:6
-            self.cmd,                   # 6:9
-            gait_phase,                 # 9:11
-            qpos_j - self.default_j,    # 11:40
-            qvel_j,                     # 40:69
-            self.prev_action,           # 69:98
+            omega, qpos_j - self.default_j, qvel_j, self.prev_action,
+            self.cmd, gait_phase, gravity,
         ]).astype(np.float32)
         return obs
 
     def policy_step(self):
         """One policy query; the action is held until the next one."""
         # run the policy; the action also feeds the next observation
-        self.action = self.policy.inference(self.build_observation()).astype(np.float32)
+        self.action = self.policy.run(None, {self.policy.get_inputs()[0].name: self.build_observation()[None]})[0].reshape(-1).astype(np.float32)
+        self.clock.advance()
         self.prev_action = self.action
 
     # PHYSICS
@@ -303,7 +306,7 @@ class Simulation:
                     # policy tick: send the state, read the newest command, check timeout, run policy
                     if k % self.decimation == 0:
                         state_pub.send(pack_state(self.data.time, self.data.qpos, self.data.qvel,
-                                                  self.prev_action))
+                                                  self.prev_action, self.clock.state))
                         try:
                             cmd, self.ref = unpack_twist(cmd_sub.recv(zmq.NOBLOCK))
                             self.set_cmd(cmd)

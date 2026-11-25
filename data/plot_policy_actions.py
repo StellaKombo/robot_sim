@@ -22,7 +22,7 @@ for directory in (ROOT, Path(__file__).resolve().parent):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 from compare_rom_data import COLORS, load_rom_run, warn_if_unmatched
-from policy.config import G1Config
+from policy.config import G1Config, POLICY_PATH, policy_metadata
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,7 @@ class PolicyRun:
     targets: np.ndarray
     measured: np.ndarray
     dt: float
-    gait_period: float
+    gait_periods: tuple[float, ...]
     configuration_verified: bool
 
 
@@ -50,7 +50,8 @@ def verify_configuration(directory):
     path = directory / "pair_plan.json"
     hashes = json.loads(path.read_text()).get("source_hashes", {}) if path.is_file() else {}
     verified = True
-    for name in ("policy/config.py", "deploy_robot/models/g1/g1_29dof_mode11.xml"):
+    for name in ("policy/config.py", "deploy_robot/models/g1/g1_29dof_mode11.xml",
+                 str(POLICY_PATH.relative_to(ROOT))):
         recorded = hashes.get(name)
         if recorded is None:
             verified = False
@@ -100,9 +101,18 @@ def load_policy_run(directory, *, label=None):
     plan_path = directory / "trial_plan.json"
     settings = json.loads(plan_path.read_text())["mpc"] if plan_path.is_file() else {}
     model = settings.get("prediction_model")
-    default = {"kcf": "KCF", "single_integrator": "Single integrator"}.get(model, directory.name)
+    default = {"kcf": "KCF", "unicycle": "Unicycle"}.get(model, directory.name)
+    # Clip periods vary with the effective command; idle has no gait harmonics.
+    meta = policy_metadata()
+    clips = np.asarray(json.loads(meta["library_clips"]))
+    weights = np.asarray(json.loads(meta["twist_metric_weights"]))
+    aligned = commands[command_indices]
+    active = aligned[np.any(aligned != 0., axis=-1)]
+    nearest = np.argmin(np.sum((active[:, None, :] - clips[None, :, :3])**2
+                               * weights, axis=-1), axis=-1)
+    periods = tuple(np.unique(clips[nearest, 3] / float(meta["library_fps"])))
     return PolicyRun(label or default, times, commands[command_indices], actions, targets,
-                     measured, dt, cfg.gait_period, verified)
+                     measured, dt, periods, verified)
 
 
 def analysis_window(runs, start=10., end=None):
@@ -143,7 +153,7 @@ def plot_policy_comparison(runs, indices, *, start=10., end=None, zoom=6., cutof
         raise ValueError("Select two runs and one to six distinct joints")
     names = joint_names()
     if any(i < 0 or i >= len(names) for i in indices):
-        raise ValueError("Joint indices must be in [0,22]")
+        raise ValueError(f"Joint indices must be in [0,{len(names)-1}]")
     if not np.isfinite(zoom) or zoom <= 0:
         raise ValueError("Zoom duration must be finite and positive")
     start, end = analysis_window(runs, start, end)
@@ -206,7 +216,7 @@ def plot_policy_comparison(runs, indices, *, start=10., end=None, zoom=6., cutof
                 continue
             ax.set(xlim=(0, nyquist), xlabel="Frequency [Hz]", ylabel="Power density [signal units²/Hz]")
             ax.axvspan(cutoff, nyquist, color="gray", alpha=.08)
-            for period in sorted(set(run.gait_period for run in runs)):
+            for period in sorted({period for run in runs for period in run.gait_periods}):
                 for harmonic in range(1, 6):
                     ax.axvline(harmonic / period, color="gray", linestyle=":", linewidth=.7)
             ax.grid(True, alpha=.25)
@@ -227,7 +237,7 @@ def plot_policy_comparison(runs, indices, *, start=10., end=None, zoom=6., cutof
     bars[0].legend(fontsize=8)
     for ax in bars:
         ax.grid(True, axis="x", alpha=.25)
-    summary.suptitle(f"All 23 joints, {start:g}–{end:g} s — variation includes intended gait; not a noise verdict")
+    summary.suptitle(f"All {len(names)} joints, {start:g}–{end:g} s — variation includes intended gait; not a noise verdict")
     return {"policy_time_traces": traces, "policy_spectra": spectra, "policy_joint_summary": summary}, metrics
 
 

@@ -1,9 +1,9 @@
 # robot_sim
 
-Run and compare KCF-MPC and single-integrator MPC on a G1 humanoid in MuJoCo,
-using the same frozen RL locomotion policy. The selected model is the epoch-3240 checkpoint, trained with the frozen
-29-DoF walking policy. The simulator uses its matching ONNX policy and MuJoCo scene
-from `deploy_robot/policy/g1/` and `deploy_robot/models/g1/`.
+Run and compare KCF-MPC and unicycle model MPC on a G1 humanoid in MuJoCo,
+using the epoch-5460 running model and its matching 29-DoF ONNX policy in
+`policy/run/`. The simulator uses the matching observation layout, variable gait
+clock and backpack dynamics. Numerical settings remain in `KCF_MPC/config/mpc_config.py`.
 
 This checkout is a simulation/testing handover, not a hardware driver or a
 hardware-qualified implementation. The active optimizer is GPU-resident iCEM;
@@ -49,7 +49,7 @@ Terminal 2, choose one:
 
 ```bash
 python sim/single/control_custom.py
-python sim/single/control_custom.py --single-integrator
+python sim/single/control_custom.py --unicycle
 python sim/single/control_kb.py
 python sim/single/control_joy.py
 ```
@@ -69,17 +69,17 @@ CUDA_VISIBLE_DEVICES=0 python KCF_MPC/scripts/visual_recovery_trial.py kcf_hairp
   --reference-mode hairpin --duration 120 --synchronous
 ```
 
-Add `--single-integrator` for SI, or `--headless` to suppress the trial viewer.
+Add `--unicycle` for the unicycle baseline, or `--headless` to suppress the trial viewer.
 The square, hairpin and slalom keep moving through smooth finite-radius turns;
 stop–turn–go includes standing and in-place turns.
 
 ## Code map and recovery
 
-- `policy/`: walking policy loader and configuration; `deploy_robot/models/g1/` and
-  `deploy_robot/policy/g1/`: matching 29-DoF XML/meshes and frozen ONNX policy.
+- `policy/`: running ONNX, deployment metadata, gait clock and command bands;
+  `deploy_robot/models/g1/`: 29-DoF XML/meshes.
 - `sim/single/`: simulator and command-source entry points.
 - `utils/kcf_controller.py`, `utils/kcf_reference.py`, `utils/g1_kcf_state*.py`:
-  controller lifecycle, references, native-103 encoding and fixed-frame adapter.
+  controller lifecycle, references, native-104 encoding and fixed-frame adapter.
 - `KCF_MPC/config/mpc_config.py`: selected checkpoint and numerical settings.
 - `KCF_MPC/models/`, `KCF_MPC/mpc/`: learned-model inference and MPC library.
 - `KCF_MPC/scripts/`, `data/*.py`: simulation runs, validation and diagnostics.

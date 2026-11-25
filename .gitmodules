@@ -1,3 +1,6 @@
 [submodule "KCF_MPC"]
 	path = KCF_MPC
 	url = https://github.com/StellaKombo/KCF_MPC.git
+[submodule "deploy_robot"]
+	path = deploy_robot
+	url = https://github.com/sesteban951/deploy_robot.git

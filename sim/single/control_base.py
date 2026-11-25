@@ -10,7 +10,7 @@ import os
 import sys
 import time
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # third-party imports
 import numpy as np
@@ -36,6 +36,8 @@ class RobotState:
     v: np.ndarray      # (nv,) base linear vel, world frame (3), base angular vel, body frame (3), joint vels
     prev_action: np.ndarray   # (nu,) policy action from the previous 50 Hz tick, as in its next observation
 
+    policy_clock: np.ndarray = field(default_factory=lambda: np.array([0., 1., 43.], dtype=np.float32))
+
 
 def nominal_state(cfg: G1Config) -> RobotState:
     """Default standing pose with zero velocity everywhere."""
@@ -52,7 +54,7 @@ def nominal_state(cfg: G1Config) -> RobotState:
 class CommandSource:
     """Base for every controller: return the body-frame [vx, vy, wz] for a RobotState.
 
-    `get` is called every control_dt; the sim clips the result to cmd_scale. `self.t_start` is the
+    `get` is called every control_dt; the sim projects onto the running command bands. `self.t_start` is the
     sim time of the first state received, so `state.t - self.t_start` is a controller clock that
     starts at 0. A source may set `self.ref` to a world-frame [x, y] in `get`, and the sim draws it
     as a ball on the floor.
@@ -112,8 +114,8 @@ def run(cmd_source: CommandSource, cfg: G1Config):
                 state_sub.poll(timeout=max(1, round(period * 1000)), flags=zmq.POLLIN)
             # newest state from the sim, if a new one arrived
             try:
-                t, q, v, prev_action = unpack_state(state_sub.recv(zmq.NOBLOCK), 7 + nu, 6 + nu, nu)
-                state = RobotState(t=t, q=q, v=v, prev_action=prev_action)
+                t, q, v, prev_action, policy_clock = unpack_state(state_sub.recv(zmq.NOBLOCK), 7 + nu, 6 + nu, nu)
+                state = RobotState(t=t, q=q, v=v, prev_action=prev_action, policy_clock=policy_clock)
 
                 # zero the controller clock at the first state, and again if sim time jumps back (restart)
                 if not have_state or t < last_t:

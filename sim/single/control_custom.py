@@ -11,7 +11,6 @@ from utils.kcf_controller import (
     get_default_mpc_config,
     resolve_mpc_settings,
 )
-from utils.g1_kcf_state import g1_closed_loop_state
 
 
 class CustomCommand(KCFCommand):
@@ -47,9 +46,9 @@ def parse_args(argv=None):
         description="G1 custom controller: KCF iCEM MPC (pair with simulation.py)."
     )
     parser.add_argument(
-        "--single-integrator",
+        "--unicycle",
         action="store_true",
-        help="Use single-integrator prediction and its configured gains (iCEM unchanged)",
+        help="Use unicycle prediction and its configured gains (iCEM unchanged)",
     )
     reference = parser.add_mutually_exclusive_group()
     reference.add_argument('--reference-mode', choices=REFERENCE_MODES,
@@ -68,7 +67,7 @@ def main():
     source = CustomCommand(
         cfg.cmd_scale,
         reference_mode=args.reference_mode or ("lissajous" if args.lissajous else None),
-        prediction_model="single_integrator" if args.single_integrator else None,
+        prediction_model="unicycle" if args.unicycle else None,
     )
     try:
         run(source, cfg)

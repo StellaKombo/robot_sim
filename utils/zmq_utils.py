@@ -37,18 +37,18 @@ def unpack_twist(buf: bytes):
     return a[:3].astype(np.float32), ref
 
 
-def pack_state(t: float, qpos, qvel, prev_action) -> bytes:
-    """Sim time, full qpos, full qvel, and the policy's previous action as raw float64s."""
-    return np.concatenate([[t], qpos, qvel, prev_action]).astype(np.float64).tobytes()
+def pack_state(t: float, qpos, qvel, prev_action, policy_clock) -> bytes:
+    """Sim time, full qpos, full qvel, previous action and actual gait clock as float64s."""
+    return np.concatenate([[t], qpos, qvel, prev_action, policy_clock]).astype(np.float64).tobytes()
 
 
 def unpack_state(buf: bytes, nq: int, nv: int, nu: int):
-    """Inverse of `pack_state`: (t, qpos, qvel, prev_action)."""
+    """Inverse of `pack_state`: (t, qpos, qvel, prev_action, policy_clock)."""
     # reject anything that doesn't match this robot's sizes
     a = np.frombuffer(buf, dtype=np.float64)
-    if a.size != 1 + nq + nv + nu:
-        raise ValueError(f"state message has {a.size} floats, expected {1 + nq + nv + nu}.")
-    return float(a[0]), a[1:1 + nq].copy(), a[1 + nq:1 + nq + nv].copy(), a[1 + nq + nv:].copy()
+    if a.size != 1 + nq + nv + nu + 3:
+        raise ValueError(f"state message has {a.size} floats, expected {1 + nq + nv + nu + 3}.")
+    return float(a[0]), a[1:1 + nq].copy(), a[1 + nq:1 + nq + nv].copy(), a[1 + nq + nv:1 + nq + nv + nu].copy(), a[-3:].copy()
 
 
 ############################################################################

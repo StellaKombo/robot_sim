@@ -16,3 +16,4 @@
 .venv/
 # Regression tests stay on this machine, not in the shared checkout.
 /tests/
+!/data/data/running_restored_validation

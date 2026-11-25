@@ -59,7 +59,7 @@ def load_trace(path):
         settings = json.loads(str(data["metadata"]))["settings"]
         trace = Trace(
             path=path,
-            label={"kcf": "KCF", "single_integrator": "Single integrator"}.get(
+            label={"kcf": "KCF", "unicycle": "Unicycle"}.get(
                 settings.get("prediction_model"), path.stem
             ),
             settings=settings,
