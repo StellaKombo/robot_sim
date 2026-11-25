@@ -16,27 +16,32 @@ from policy.config import G1Config
 from utils.g1_kcf_state import g1_closed_loop_state, g1_world_heading
 from utils.kcf_reference import PlanarReference
 
-# KCF_MPC currently uses flat imports; keep this boundary in one place.
+# Reuse the validated native-103 walking backend alongside the shared ONNX
+# policy. Keep the research configuration and robot_sim execution here.
 KCF_ROOT = Path(ROOT_DIR) / "KCF_MPC"
 if str(KCF_ROOT) not in sys.path:
     sys.path.insert(0, str(KCF_ROOT))
+
+DEPLOY_ROOT = Path(ROOT_DIR) / "deploy_robot"
+if str(DEPLOY_ROOT) not in sys.path:
+    sys.path.append(str(DEPLOY_ROOT))
 
 from config.mpc_config import (
     REFERENCE_MODES,
     get_default_mpc_config,
     resolve_mpc_model_config,
 )
-from KCF_MPC.mpc.mpc import create_mpc_controller
-from KCF_MPC.mpc.mpc_runtime import StartupGCFreeze
-from KCF_MPC.mpc.mpc_trace import MPCSolveTrace
-from KCF_MPC.mpc.tracking import TRACKING_LABELS
-from KCF_MPC.mpc.mpc_buffered import (
+from kcf_mpc.mpc.mpc import create_mpc_controller
+from kcf_mpc.mpc.mpc_runtime import StartupGCFreeze
+from kcf_mpc.mpc.mpc_trace import MPCSolveTrace
+from kcf_mpc.mpc.tracking import TRACKING_LABELS
+from kcf_mpc.mpc.mpc_buffered import (
     AsyncConsole,
     BufferedPlan,
     SingleSolveWorker,
     SolveRequest,
 )
-from KCF_MPC.mpc.mpc_handover import HandoverTiming, predict_handover_state
+from kcf_mpc.mpc.mpc_handover import HandoverTiming, predict_handover_state
 
 
 def _configure_cpu_affinity(cpus):
@@ -97,7 +102,8 @@ def resolve_mpc_settings(
 class KCFCommand(CommandSource):
     """Track a configured planar reference using the selected MPC predictor.
 
-    The optimizer, cost and existing input bounds belong to KCF_MPC/mpc/mpc.py.
+    The optimizer and cost use deploy_robot/kcf_mpc; bounds and gains come
+    from KCF_MPC/config/mpc_config.py.
     iCEM performs forward-only GPU population evaluation.
     """
 

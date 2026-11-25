@@ -5,6 +5,7 @@
 # Keep plotting source under data/; recordings and offline experiments stay local.
 /data/*
 !/data/*.py
+!/data/data/walking_si_star_comparison_20261125/videos
 /.pytest_cache/
 /.coverage
 /htmlcov/
@@ -16,3 +17,4 @@
 .venv/
 # Regression tests stay on this machine, not in the shared checkout.
 /tests/
+/deploy_robot
