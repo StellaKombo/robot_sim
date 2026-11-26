@@ -27,7 +27,7 @@ ROOT_DIR = os.getenv("ROBOT_SIM_ROOT_DIR",
 sys.path.insert(0, ROOT_DIR)
 from policy.actor import load_policy
 from policy.config import G1Config
-from sim.single.obstacle import DEFAULT_OBSTACLE, OBSTACLE_BODY, MocapSphere
+from sim.single.obstacle import CROSSING_MOTION, DEFAULT_OBSTACLE, OBSTACLE_BODY, MocapSphere
 from utils.math_utils import gravity_from_quat, q_to_rom, v_to_rom
 from utils.zmq_utils import CMD_PORT, STATE_PORT, bind_pub, bind_sub, pack_state, unpack_twist
 
@@ -530,18 +530,32 @@ def main():
     parser.add_argument("--log_hz", type=float, default=LOG_HZ, metavar="HZ",
                         help=f"logging rate; must divide the {1.0 / SIM_DT:g} Hz sim rate (default {LOG_HZ:g})")
     parser.add_argument('--obstacle-position', nargs=3, type=float, metavar=('X', 'Y', 'Z'),
-                        default=DEFAULT_OBSTACLE.position, help='Mocap sphere center in world metres')
+                        help='Initial sphere position, or crossing centre, in world metres')
     parser.add_argument('--obstacle-radius', type=float, default=DEFAULT_OBSTACLE.radius,
                         help='Mocap sphere radius in metres')
     parser.add_argument('--no-obstacle', action='store_true', help='Omit the mocap sphere')
-    parser.add_argument('--obstacle-velocity', nargs=3, type=float, default=(0., 0., 0.),
+    parser.add_argument('--obstacle-velocity', nargs=3, type=float,
                         metavar=('VX', 'VY', 'VZ'), help='Constant world velocity in m/s')
+    parser.add_argument('--obstacle-motion', choices=('scripted', 'cross'), default='scripted',
+                        help='Use the shared repeating x/y crossing environment')
     args = parser.parse_args()
 
     # build the sim and run until the viewer closes or Ctrl+C
     robot_cfg = G1Config()
-    obstacle = MocapSphere(enabled=not args.no_obstacle, radius=args.obstacle_radius,
-                           position=args.obstacle_position, velocity=args.obstacle_velocity)
+    if args.obstacle_motion == 'cross':
+        if args.obstacle_velocity is not None:
+            parser.error('Set CROSSING_MOTION speed for cross motion; --obstacle-velocity is for scripted motion')
+        motion = dict(CROSSING_MOTION)
+        if args.obstacle_position is not None:
+            motion['center'] = args.obstacle_position
+        obstacle = MocapSphere.crossing(**motion, enabled=not args.no_obstacle,
+                                       radius=args.obstacle_radius)
+    else:
+        obstacle = MocapSphere(enabled=not args.no_obstacle, radius=args.obstacle_radius,
+                               position=(DEFAULT_OBSTACLE.position if args.obstacle_position is None
+                                         else args.obstacle_position),
+                               velocity=(DEFAULT_OBSTACLE.velocity if args.obstacle_velocity is None
+                                         else args.obstacle_velocity))
     sim = Simulation(XML_PATH, POLICY_PATH,
                      SIM_DT,
                      robot_cfg,

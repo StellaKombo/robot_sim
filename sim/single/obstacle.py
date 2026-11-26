@@ -20,6 +20,7 @@ class MocapSphere:
     collisions: bool = True
     velocity: tuple[float, float, float] = (0., 0., 0.)
     velocity_changes: tuple = ()  # (simulation time, world XYZ velocity), piecewise constant
+    repeat_period: float | None = None  # Repeat a closed schedule indefinitely.
 
     # Define the color and position of the obstacle
     def __post_init__(self):
@@ -53,6 +54,45 @@ class MocapSphere:
             previous_time = stamp
         object.__setattr__(self, 'velocity', tuple(velocity))
         object.__setattr__(self, 'velocity_changes', tuple(changes))
+        if self.repeat_period is not None:
+            period = self.repeat_period
+            if (isinstance(period, bool) or not isinstance(period, Real)
+                    or not math.isfinite(period) or period <= previous_time):
+                raise ValueError('Repeat period must be finite, positive and after the last velocity change')
+            displacement, previous_time, current = np.zeros(3), 0., velocity
+            for stamp, next_velocity in changes:
+                displacement += (stamp - previous_time) * current
+                previous_time, current = stamp, np.asarray(next_velocity)
+            displacement += (period - previous_time) * current
+            if not np.allclose(displacement, 0., rtol=0., atol=1e-9):
+                raise ValueError('Repeating motion must return to its initial position without teleporting')
+            object.__setattr__(self, 'repeat_period', float(period))
+
+    @classmethod
+    def crossing(cls, *, speed, center, half_extent, **sphere_settings):
+        """Continuous left/right, then top/bottom passes; speed is in m/s.
+
+        Start at the left endpoint. Return through the crossing centre before
+        switching axes, then repeat for any reference duration.
+        """
+        center, extent = np.asarray(center, dtype=float), np.asarray(half_extent, dtype=float)
+        if (isinstance(speed, bool) or not isinstance(speed, Real)
+                or not math.isfinite(speed) or speed <= 0.):
+            raise ValueError('Crossing speed must be finite and positive')
+        if center.shape != (3,) or not np.isfinite(center).all():
+            raise ValueError('Crossing center must contain three finite world coordinates')
+        if extent.shape != (2,) or not np.isfinite(extent).all() or np.any(extent <= 0.):
+            raise ValueError('Crossing half_extent must contain two finite positive distances')
+        x, y = extent
+        offsets = np.array([[-x, 0., 0.], [x, 0., 0.], [0., 0., 0.],
+                            [0., y, 0.], [0., -y, 0.], [0., 0., 0.], [-x, 0., 0.]])
+        legs = np.diff(offsets, axis=0)
+        lengths = np.linalg.norm(legs, axis=1)
+        times = np.cumsum(lengths / speed)
+        velocities = legs * (speed / lengths[:, None])
+        return cls(position=tuple(center + offsets[0]), velocity=tuple(velocities[0]),
+                   velocity_changes=tuple(zip(times[:-1], velocities[1:])),
+                   repeat_period=float(times[-1]), **sphere_settings)
 
     @property
     def moving(self):
@@ -62,6 +102,8 @@ class MocapSphere:
         """Continuous scripted position; the controller never sees this schedule."""
         if not math.isfinite(stamp) or stamp < 0:
             raise ValueError('Obstacle sample time must be finite and nonnegative')
+        if self.repeat_period is not None:
+            stamp %= self.repeat_period
         position, velocity, previous_time = np.array(self.position), np.array(self.velocity), 0.
         for change_time, next_velocity in self.velocity_changes:
             if stamp < change_time:
@@ -80,3 +122,7 @@ class MocapSphere:
 
 
 DEFAULT_OBSTACLE = MocapSphere()
+
+# Shared moving environment for every reference and both predictors. These are
+# sphere-center travel limits; the default sphere stays inside the 5 x 5 m box.
+CROSSING_MOTION = dict(speed=1.0, center=(0., 0., .15), half_extent=(2.2, 2.2))
