@@ -8,8 +8,10 @@
 import argparse
 import contextlib
 import copy
+import json
 import math
 import os
+from pathlib import Path
 import sys
 import threading
 import time
@@ -33,6 +35,7 @@ from utils.zmq_utils import CMD_PORT, STATE_PORT, bind_pub, bind_sub, pack_state
 # GLOBAL VARIABLES
 XML_PATH = os.path.join(ROOT_DIR, "deploy_robot", "models", "g1", "g1_29dof_mode11_scene.xml")
 POLICY_PATH = os.path.join(ROOT_DIR, "deploy_robot", "policy", "g1", "g1_29dof_vel.onnx")
+MAZE_PATH = Path(__file__).with_name("maze.json")
 SIM_DT = 0.002      # [s] physics timestep
 LOG_HZ = 100.0      # [Hz] default logging rate; must divide the sim rate exactly
 RENDER_HZ = 50.0    # [Hz] visual rendering frequency
@@ -61,9 +64,39 @@ LEGEND_FONT = getattr(mujoco.mjtFontScale, "mjFONTSCALE_250",
 # MODEL
 ############################################################################
 
-def load_model(xml_path: str) -> mujoco.MjModel:
-    """Load the XML and add the world-frame triad; its geoms are massless and never collide."""
+def add_maze(spec: mujoco.MjSpec, maze: dict):
+    """Add fixed collision boxes; layout dimensions are full lengths in metres."""
+    height = float(maze["wall_height"])
+    if not math.isfinite(height) or height <= 0 or not maze["walls"]:
+        raise ValueError("Maze needs a positive wall_height and at least one wall")
+    corners = []
+    for wall in maze["walls"]:
+        center = np.asarray(wall["center_xy"], dtype=float)
+        size = np.asarray(wall["size_xy"], dtype=float)
+        yaw = float(wall.get("yaw", 0.0))
+        if (center.shape != (2,) or size.shape != (2,)
+                or not np.isfinite(np.r_[center, size, yaw]).all() or np.any(size <= 0)):
+            raise ValueError(f"Invalid maze wall: {wall['name']}")
+        spec.worldbody.add_geom(
+            name=f"maze_{wall['name']}", type=mujoco.mjtGeom.mjGEOM_BOX,
+            pos=[*center, height / 2], size=[*(size / 2), height / 2],
+            quat=[math.cos(yaw / 2), 0, 0, math.sin(yaw / 2)],
+            contype=1, conaffinity=1, density=0, rgba=[0.35, 0.45, 0.55, 1],
+        )
+        rotation = np.array([[math.cos(yaw), -math.sin(yaw)],
+                             [math.sin(yaw), math.cos(yaw)]])
+        corners.extend((np.array([[-1, -1], [-1, 1], [1, -1], [1, 1]])
+                        * size / 2) @ rotation.T + center)
+    lower, upper = np.min(corners, axis=0), np.max(corners, axis=0)
+    spec.stat.center = [*((lower + upper) / 2), height / 2]
+    spec.stat.extent = float(np.linalg.norm(upper - lower) / 2)
+
+
+def load_model(xml_path: str, *, maze: dict = None) -> mujoco.MjModel:
+    """Load the robot scene, optional collision walls, and decorative world axes."""
     spec = mujoco.MjSpec.from_file(xml_path)
+    if maze is not None:
+        add_maze(spec, maze)
     body = spec.worldbody.add_body(name="world_axes")
     for fromto, rgba in (
         ([0, 0, 0, AXIS_LEN, 0, 0], [1, 0, 0, AXIS_ALPHA]),   # +X red
@@ -142,7 +175,7 @@ class Simulation:
 
     def __init__(self, xml_path: str, policy_path: str, sim_dt: float, robot_cfg: G1Config = None,
                  headless: bool = False, log_name: str = None, log_hz: float = LOG_HZ,
-                 readonly_viewer: bool = False):
+                 readonly_viewer: bool = False, maze: dict = None):
         # config and run options
         self.cfg = robot_cfg or G1Config()
         self.nu = len(self.cfg.Kp)
@@ -152,9 +185,17 @@ class Simulation:
         self.readonly_viewer = readonly_viewer
         self._display_model = self._display_data = None
         self.log_name = log_name     # run name; the log goes to data/data/<log_name>/
+        self.maze = maze
+        self.initial_base_pos = self.cfg.default_base_pos.copy()
+        if maze is not None:
+            pose = np.asarray(maze["spawn_pose"], dtype=float)
+            if pose.shape != (3,) or not np.isfinite(pose).all():
+                raise ValueError("Maze spawn_pose must be finite [x, y, yaw]")
+            self.initial_base_pos[:2] = pose[:2]
+            self.initial_base_pos[3:7] = [math.cos(pose[2] / 2), 0, 0, math.sin(pose[2] / 2)]
 
         # model and data
-        self.model = load_model(xml_path)
+        self.model = load_model(xml_path, maze=maze)
         self.model.opt.timestep = sim_dt
         self.data = mujoco.MjData(self.model)
         
@@ -183,10 +224,10 @@ class Simulation:
         self.reset()
 
     def reset(self):
-        """Nominal pose, zero velocity, zero command, cleared policy memory and log."""
+        """Configured spawn, nominal joints, zero motion, and cleared policy memory/log."""
         
         # robot at the nominal pose, at rest
-        self.data.qpos[:7] = self.cfg.default_base_pos
+        self.data.qpos[:7] = self.initial_base_pos
         self.data.qpos[7:7 + self.nu] = self.cfg.default_joint_pos
         self.data.qvel[:] = 0.0
         self.data.time = 0.0
@@ -372,6 +413,11 @@ class Simulation:
                 viewer.cam.elevation = -20
                 viewer.cam.distance = 3.0
                 viewer.cam.lookat[:] = (0.0, 0.0, 0.8)
+                if getattr(self, "maze", None) is not None:
+                    viewer.cam.lookat[:] = self.model.stat.center
+                    viewer.cam.distance = 2.4 * self.model.stat.extent
+                    viewer.cam.azimuth = 90
+                    viewer.cam.elevation = -65
             if self.readonly_viewer:
                 # Drain startup GUI actions while physics is still frozen, then
                 # display the intended initial state before the trial handshake.
@@ -497,11 +543,18 @@ def main():
                         help="save the run to data/data/NAME/ when the sim exits")
     parser.add_argument("--log_hz", type=float, default=LOG_HZ, metavar="HZ",
                         help=f"logging rate; must divide the {1.0 / SIM_DT:g} Hz sim rate (default {LOG_HZ:g})")
+    parser.add_argument("--maze", nargs="?", const=MAZE_PATH, type=Path, metavar="JSON",
+                        help="add maze walls from JSON (default: sim/single/maze.json)")
     args = parser.parse_args()
 
     # build the sim and run until the viewer closes or Ctrl+C
     robot_cfg = G1Config()
-    sim = Simulation(XML_PATH, POLICY_PATH, SIM_DT, robot_cfg, log_name=args.log, log_hz=args.log_hz)
+    maze = json.loads(args.maze.read_text()) if args.maze is not None else None
+    sim = Simulation(XML_PATH, POLICY_PATH, SIM_DT, robot_cfg, log_name=args.log,
+                     log_hz=args.log_hz, maze=maze)
+    if maze is not None:
+        print(f"Loaded {len(maze['walls'])} maze walls from {args.maze}. "
+              "Start control_custom.py --reference-mode maze for A* navigation.")
     try:
         sim.run()
     except KeyboardInterrupt:

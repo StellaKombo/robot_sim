@@ -45,6 +45,14 @@ For interactive testing, open two terminals in the same environment. Terminal 1:
 python sim/single/simulation.py --log interactive_01 --log_hz 100
 ```
 
+To inspect the maze with the robot standing, run `python sim/single/simulation.py --maze`
+without a controller. To navigate, start `python sim/single/control_custom.py --reference-mode maze`
+in terminal 2. Edit walls (full lengths in metres), `spawn_pose` and `goal_pose` in
+`sim/single/maze.json`; A* uses that same layout and waits for measured arrival before each turn.
+Planning clearance, footprint and reference speeds are in `maze_reference` in
+`KCF_MPC/config/mpc_config.py`. For another layout, set its `layout_path` and pass the same JSON
+to `simulation.py --maze PATH.json`. The timed trial launcher does not support maze navigation.
+
 Terminal 2, choose one:
 
 ```bash

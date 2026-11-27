@@ -1,8 +1,12 @@
 """Generate samples from the reference selected in KCF_MPC/config/mpc_config.py.
 """
 
+import json
+from pathlib import Path
+
 import numpy as np
 from KCF_MPC.config.mpc_config import REFERENCE_MODES
+from utils.path_planning import MazeGrid
 
 
 def sincos_tracking_reference(reference):
@@ -71,6 +75,7 @@ class PlanarReference:
             self._configure_maneuver(settings.get(f"{self.mode}_reference"))
         if self.mode == "star":
             self._configure_star(settings.get("star_reference"))
+        self.maze = _MazeReference(settings) if self.mode == 'maze' else None
         self._configure_workspace(settings.get("reference_workspace"))
         startup = settings.get("reference_startup")
         self.startup = None
@@ -92,6 +97,8 @@ class PlanarReference:
 
     def reset_initial_pose(self):
         self._initial_pose = None
+        if self.maze is not None:
+            self.maze.reset()
         if self._configured_initial_pose is not None:
             self.set_initial_pose(self._configured_initial_pose)
 
@@ -101,6 +108,11 @@ class PlanarReference:
         if pose.shape != (3,) or not np.isfinite(pose).all():
             raise ValueError('Startup initial_pose must be a finite [x, y, yaw]')
         self._check_workspace(pose[None, :2], 'Startup initial_pose')
+        if self.maze is not None:
+            self.maze.plan(pose)
+            self._check_workspace(self.maze.path, 'Maze route')
+            self._initial_pose = pose.copy()
+            return
         self._initial_pose = pose.copy()
         if self.startup is None:
             return
@@ -131,7 +143,7 @@ class PlanarReference:
     @property
     def startup_delay(self):
         """Steady path-clock offset after the smooth startup finishes."""
-        return (0. if self.startup is None or self._initial_pose is None else
+        return (0. if self.maze is not None or self.startup is None or self._initial_pose is None else
                 self.startup['hold_seconds'] + self._startup_duration / 2.)
 
     @property
@@ -145,7 +157,7 @@ class PlanarReference:
     def path_time(self, t):
         """Saved path clock, used also to align waypoint completion/dwell checks."""
         t = np.asarray(t, dtype=float)
-        if self.startup is None or self._initial_pose is None:
+        if self.maze is not None or self.startup is None or self._initial_pose is None:
             return t
         duration = self._startup_duration
         elapsed = t - self.startup['hold_seconds']
@@ -182,7 +194,9 @@ class PlanarReference:
         self.workspace_bounds = np.stack((center - half, center + half))
         if not np.isfinite(self.workspace_bounds).all():
             raise ValueError('reference_workspace bounds must be finite')
-        if self.mode == 'lissajous':
+        if self.maze is not None:
+            points = np.array([self.maze.spawn[:2], self.maze.goal[:2]])
+        elif self.mode == 'lissajous':
             extent = np.array([self.half_width, self.half_height])
             points = self.lissajous_center + np.stack((-extent, extent))
         elif self.mode in ('waypoints', 'stop_turn_go', 'star'):
@@ -418,6 +432,8 @@ class PlanarReference:
         t = np.asarray(t, dtype=float)
         if not np.isfinite(t).all():
             raise ValueError('Reference query times must be finite')
+        if self.maze is not None:
+            return self.maze.reference(t)
         if self.startup is None or self._initial_pose is None:
             return self._raw_reference(t)
         duration = self._startup_duration
@@ -535,3 +551,102 @@ class PlanarReference:
         return sincos_tracking_reference(
             np.concatenate([q_ref, v_ref_body, gravity_ref], axis=-1)
         )
+
+
+class _MazeReference:
+    """One static A* plan, followed by measured-arrival stop/turn/go stages.
+
+    Horizon queries never advance the stage. Feedback must confirm that the
+    robot has arrived and settled before the next leg becomes visible to MPC.
+    """
+
+    def __init__(self, settings):
+        configuration = settings['maze_reference']
+        maze = json.loads(Path(configuration['layout_path']).read_text())
+        self.spawn = np.asarray(maze['spawn_pose'], dtype=float)
+        self.goal = np.asarray(maze['goal_pose'], dtype=float)
+        if (self.spawn.shape != (3,) or self.goal.shape != (3,)
+                or not np.isfinite(np.r_[self.spawn, self.goal]).all()):
+            raise ValueError('Maze spawn_pose and goal_pose must be finite [x, y, yaw]')
+        self.grid = MazeGrid(maze, resolution=configuration['resolution_m'],
+                             robot_radius=configuration['robot_radius_m'],
+                             clearance=configuration['clearance_m'])
+        keys = ('speed', 'yaw_rate', 'settle_seconds')
+        values = np.asarray([configuration[key] for key in keys], dtype=float)
+        if not np.isfinite(values).all() or np.any(values <= 0):
+            raise ValueError('Maze reference speeds and settle time must be positive')
+        self.speed, self.yaw_rate, self.settle = values
+        hold = settings['standing_hold']
+        # Reuse the controller's hold acceptance; a stricter arrival test can
+        # deadlock while standing hold deliberately permits a small pose error.
+        self.position_tolerance = hold['exit_position_m']
+        self.heading_tolerance = hold['exit_heading_rad']
+        self.linear_settle_speed = hold['enter_linear_speed_mps']
+        self.angular_settle_speed = hold['enter_yaw_rate_rps']
+        self.initial_hold = (settings.get('reference_startup') or {}).get('hold_seconds', 0.)
+        self.reset()
+
+    def reset(self):
+        self.path = None
+        self.poses = None
+        self.durations = None
+        self.index = 0
+        self.stage_start = self.settled_since = None
+        self.complete = False
+
+    def plan(self, pose):
+        path = self.grid.plan(pose[:2], self.goal[:2])
+        poses, durations = [pose.copy(), pose.copy()], [self.initial_hold]
+
+        def append(target, duration):
+            if duration > 1e-8:
+                poses.append(target.copy())
+                durations.append(float(duration))
+
+        for first, second in zip(path[:-1], path[1:]):
+            delta = second - first
+            heading = np.arctan2(delta[1], delta[0])
+            current = poses[-1]
+            turn = np.arctan2(np.sin(heading - current[2]), np.cos(heading - current[2]))
+            aligned = np.r_[first, current[2] + turn]
+            append(aligned, 1.875 * abs(turn) / self.yaw_rate)
+            append(np.r_[second, aligned[2]], 1.875 * np.linalg.norm(delta) / self.speed)
+        current = poses[-1]
+        turn = np.arctan2(np.sin(self.goal[2] - current[2]), np.cos(self.goal[2] - current[2]))
+        append(np.r_[self.goal[:2], current[2] + turn], 1.875 * abs(turn) / self.yaw_rate)
+        self.reset()
+        self.path, self.poses, self.durations = path, np.asarray(poses), np.asarray(durations)
+
+    def observe(self, pose, velocity, t):
+        """Advance only from fresh, valid measured feedback (controller clock)."""
+        if self.path is None or self.complete:
+            return
+        if self.stage_start is None:
+            self.stage_start = float(t)
+        target = self.poses[self.index + 1]
+        heading_error = np.arctan2(np.sin(pose[2] - target[2]), np.cos(pose[2] - target[2]))
+        arrived = (t >= self.stage_start + self.durations[self.index]
+                   and np.linalg.norm(pose[:2] - target[:2]) <= self.position_tolerance
+                   and abs(heading_error) <= self.heading_tolerance
+                   and np.linalg.norm(velocity[:2]) <= self.linear_settle_speed
+                   and abs(velocity[2]) <= self.angular_settle_speed)
+        if not arrived:
+            self.settled_since = None
+        elif self.settled_since is None:
+            self.settled_since = float(t)
+        elif t - self.settled_since >= self.settle:
+            self.index += 1
+            self.stage_start, self.settled_since = float(t), None
+            self.complete = self.index == len(self.durations)
+
+    def reference(self, t):
+        if self.path is None or self.complete or self.stage_start is None:
+            pose = self.spawn if self.path is None else self.poses[-1] if self.complete else self.poses[0]
+            return np.broadcast_to(pose, t.shape + (3,)).copy(), np.zeros(t.shape + (3,))
+        duration = max(self.durations[self.index], 1e-9)
+        phase = np.clip((t - self.stage_start) / duration, 0., 1.)
+        blend = phase**3 * (10. + phase * (-15. + 6. * phase))
+        rate = 30. * phase**2 * (1. - phase)**2 / duration
+        delta = self.poses[self.index + 1] - self.poses[self.index]
+        return (self.poses[self.index] + blend[..., None] * delta,
+                rate[..., None] * delta)

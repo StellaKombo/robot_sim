@@ -53,10 +53,28 @@ class ROMRun:
     provenance: dict | None = None
     directory: Path | None = None
     env_index: int = 0
+    recorded_reference: tuple | None = None  # time, pose sine/cosine, body twist
+    maze: dict | None = None
 
     def reference(self, times):
+        if self.recorded_reference is not None:
+            clock, pose, velocity = self.recorded_reference
+            times = np.asarray(times, dtype=float)
+            if not np.isfinite(times).all():
+                raise ValueError('Reference query times must be finite')
+            def interpolate(values):
+                return np.stack([np.interp(times.ravel(), clock, column)
+                                 for column in values.T], axis=-1).reshape(times.shape + (values.shape[1],))
+            q, v = interpolate(pose), interpolate(velocity)
+            norm = np.linalg.norm(q[..., 2:4], axis=-1, keepdims=True)
+            if np.any(norm < 1e-12):
+                raise ValueError('Recorded reference has ambiguous interpolated heading')
+            q[..., 2:4] /= norm
+            return q, v
         if self.settings is None:
             return None, None
+        if self.settings.get('reference_mode') == 'maze':
+            raise ValueError('Maze replay requires reference_log.npz from measured-progress execution')
         path = PlanarReference(self.settings)
         q, v = path.reference(times)
         tracking = path.track(q, v)
@@ -92,10 +110,45 @@ def load_rom_run(run, *, env_index=0, label=None):
     launcher = path.parent / "launcher_result.json"
     provenance = json.loads(launcher.read_text()) if launcher.is_file() else None
     model = settings.get("prediction_model") if settings else None
+    recorded = None
+    reference_path = path.parent / 'reference_log.npz'
+    if reference_path.is_file():
+        with np.load(reference_path, allow_pickle=False) as saved:
+            clock, reference_pose, reference_velocity = (saved[key].copy() for key in ('time', 'pose', 'velocity'))
+        if (clock.ndim != 1 or len(clock) < 2 or reference_pose.shape != (len(clock), 4)
+                or reference_velocity.shape != (len(clock), 3)
+                or not all(np.isfinite(value).all() for value in (clock, reference_pose, reference_velocity))
+                or np.any(np.diff(clock) <= 0.)
+                or np.any(np.linalg.norm(reference_pose[:, 2:4], axis=1) < 1e-12)
+                or clock[0] > times[0] + 1e-9 or clock[-1] < times[-1] - 1e-9):
+            raise ValueError(f'{reference_path}: expected finite increasing times covering the ROM log, '
+                             'pose (T,4) and body velocity (T,3)')
+        recorded = clock, reference_pose, reference_velocity
+    maze_path = path.parent / 'maze.json'
+    maze = json.loads(maze_path.read_text()) if maze_path.is_file() else None
     default_label = {"kcf": "KCF", "single_integrator": "Single integrator",
                      "unicycle": "Unicycle"}.get(model, path.parent.name)
     return ROMRun(label or default_label, times, pose, velocity, command, settings, provenance,
-                  path.parent.resolve(), env_index)
+                  path.parent.resolve(), env_index, recorded, maze)
+
+
+def _shared_maze(runs):
+    maze = runs[0].maze
+    if any(run.maze != maze for run in runs[1:]):
+        raise ValueError('Maze comparison requires the same saved maze.json for both runs')
+    if maze is None and any((run.settings or {}).get('reference_mode') == 'maze' for run in runs):
+        raise ValueError('Maze comparison requires a recorded maze.json')
+    return maze
+
+
+def _maze_polygons(maze):
+    polygons = []
+    for wall in (maze or {}).get('walls', []):
+        angle = wall.get('yaw', 0.)
+        rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+        polygons.append(np.array(wall['center_xy']) + (np.array([[-1, -1], [-1, 1], [1, 1], [1, -1]])
+                        * np.array(wall['size_xy']) / 2.) @ rotation.T)
+    return polygons
 
 
 def comparison_window(runs, start=0., end=None):
@@ -266,8 +319,10 @@ def _mujoco_video_frames(runs, bodies, model, times, start, end, speed, title, m
     background, light = (16, 20, 28), (224, 228, 235)
     path_times = np.linspace(start, end, max(2, math.ceil((end - start) / .15) + 1))
     paths = [run.reference(path_times)[0][:, :2] for run in runs]
+    maze = _shared_maze(runs)
+    walls = _maze_polygons(maze)
     selected = [(run.times >= start) & (run.times <= end + 1e-9) for run in runs]
-    all_xy = np.concatenate(paths + [run.pose[mask, :2] for run, mask in zip(runs, selected)])
+    all_xy = np.concatenate(paths + [run.pose[mask, :2] for run, mask in zip(runs, selected)] + walls)
     lower, upper = all_xy.min(axis=0) - .2, all_xy.max(axis=0) + .2
     scale = min(196 / (upper[0] - lower[0]), 102 / (upper[1] - lower[1]))
     center = (lower + upper) / 2
@@ -291,12 +346,15 @@ def _mujoco_video_frames(runs, bodies, model, times, start, end, speed, title, m
     data, camera = mujoco.MjData(model), mujoco.MjvCamera()
     camera.type = mujoco.mjtCamera.mjCAMERA_FREE
     camera.distance, camera.azimuth, camera.elevation = 2.85, 135, -18
+    if maze is not None:
+        camera.distance, camera.azimuth, camera.elevation = 2.4 * model.stat.extent, 90, -65
     renderer = mujoco.Renderer(model, height=480, width=640, max_geom=5000)
     try:
         for sim_time in times:
             references = [run.reference(sim_time)[0] for run in runs]
             # A common world camera preserves measured offsets between the runs.
-            camera.lookat[:] = [*np.mean([ref[:2] for ref in references], axis=0), .72]
+            camera.lookat[:] = (model.stat.center if maze is not None else
+                                [*np.mean([ref[:2] for ref in references], axis=0), .72])
             canvas = Image.new("RGB", VIDEO_SIZE, background)
             draw = ImageDraw.Draw(canvas)
             draw.text((16, 8), f"{title}  |  recorded simulation  |  t={sim_time:.2f} / {end:.2f} s  |  {speed:g}x",
@@ -337,12 +395,22 @@ def _mujoco_video_frames(runs, bodies, model, times, start, end, speed, title, m
                 draw.text((offset + 14, 621),
                           f"vx,vy=[{command[0]:+.2f},{command[1]:+.2f}] m/s; wz={command[2]:+.2f} rad/s",
                           font=fonts[16], fill=(193, 198, 208))
-                outcome = (run.provenance or {}).get("simulator", {}).get("outcome", "not recorded")
+                result = (run.provenance or {}).get("simulator", {})
+                outcome = result.get("outcome", "not recorded")
                 draw.text((offset + 14, 648), f"Full trial outcome: {outcome}",
                           font=fonts[16], fill=(193, 198, 208))
+                if 'contact_episodes' in result:
+                    episodes = result['contact_episodes']
+                    count = sum(episode['start_s'] <= sim_time for episode in episodes)
+                    active = any(episode['start_s'] <= sim_time <= episode['end_s'] for episode in episodes)
+                    draw.text((offset + 14, 674),
+                              f"Wall contact episodes: {count}" + ('  |  CONTACT EPISODE' if active else ''),
+                              font=fonts[16], fill=(255, 150, 20) if active else light)
                 mini_x = offset + 418
                 draw.rectangle((mini_x, 575, mini_x + 208, 691),
                                fill=(33, 40, 52), outline=(93, 102, 117))
+                for wall in walls:
+                    draw.polygon(map_xy(wall, mini_x), fill=(93, 102, 117))
                 draw.line(map_xy(path, mini_x), fill=(165, 172, 184), width=1)
                 if len(trail) > 1:
                     draw.line(map_xy(trail, mini_x), fill=color, width=2)
@@ -388,7 +456,8 @@ def export_rom_comparison_video(runs, output, *, start=0., end=None, speed=1., f
     if os.environ["MUJOCO_GL"] == "egl":
         os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
     from sim.single.simulation import load_model, XML_PATH
-    model = load_model(XML_PATH)
+    maze = _shared_maze(runs)
+    model = load_model(XML_PATH) if maze is None else load_model(XML_PATH, maze=maze)
     if any(body.q.shape[1] != model.nq or body.v.shape[1] != model.nv for body in bodies):
         raise ValueError(f"Full-body logs must match the replay model: nq={model.nq}, nv={model.nv}")
     title = title or _reference_title(runs[0].settings["reference_mode"])
@@ -408,6 +477,7 @@ def replay_time(wall_start, wall_now, start, end, speed=1.):
 
 def warn_if_unmatched(runs):
     a, b = runs
+    _shared_maze(runs)
     for run in runs:
         if run.provenance and (not run.provenance.get("sources_unchanged", False)
                                or run.provenance.get("interrupted", False)
@@ -470,6 +540,8 @@ class ROMComparisonPlayback:
         self.axes = axes[0]
         self.triangles, self.trails, self.references = [], [], []
         all_positions = [run.pose[:, :2] for run in runs]
+        walls = _maze_polygons(_shared_maze(runs))
+        all_positions.extend(walls)
         for run in runs:
             q_ref, _ = run.reference(run.times)
             if q_ref is not None:
@@ -477,6 +549,8 @@ class ROMComparisonPlayback:
         xy = np.concatenate(all_positions)
         lower, upper = xy.min(axis=0) - .5, xy.max(axis=0) + .5
         for ax in self.axes:
+            for wall in walls:
+                ax.add_patch(Polygon(wall, facecolor='#687686', edgecolor='none', zorder=0))
             ax.set(xlabel="World x [m]", ylabel="World y [m]",
                    xlim=(lower[0], upper[0]), ylim=(lower[1], upper[1]))
             ax.set_aspect("equal", adjustable="box")

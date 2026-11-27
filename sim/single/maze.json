@@ -1,0 +1,24 @@
+{
+  "wall_height": 0.9,
+  "spawn_pose": [-1.68, -1.68, 0.0],
+  "goal_pose": [1.68, 1.96, 1.5707963267948966],
+  "walls": [
+    {"name": "west", "center_xy": [-2.1, 0.0], "size_xy": [0.12, 4.32]},
+    {"name": "east", "center_xy": [2.1, 0.0], "size_xy": [0.12, 4.32]},
+    {"name": "south_west", "center_xy": [-2.07, -2.1], "size_xy": [0.06, 0.12]},
+    {"name": "south_east", "center_xy": [0.39, -2.1], "size_xy": [3.42, 0.12]},
+    {"name": "north_west", "center_xy": [-0.39, 2.1], "size_xy": [3.42, 0.12]},
+    {"name": "north_east", "center_xy": [2.07, 2.1], "size_xy": [0.06, 0.12]},
+    {"name": "horizontal_1_0_0", "center_xy": [-1.68, -1.26], "size_xy": [0.96, 0.12]},
+    {"name": "horizontal_1_2_2", "center_xy": [0.0, -1.26], "size_xy": [0.96, 0.12]},
+    {"name": "horizontal_2_1_3", "center_xy": [0.0, -0.42], "size_xy": [2.64, 0.12]},
+    {"name": "horizontal_3_2_2", "center_xy": [0.0, 0.42], "size_xy": [0.96, 0.12]},
+    {"name": "horizontal_4_0_0", "center_xy": [-1.68, 1.26], "size_xy": [0.96, 0.12]},
+    {"name": "horizontal_4_2_4", "center_xy": [0.84, 1.26], "size_xy": [2.64, 0.12]},
+    {"name": "vertical_1_1_1", "center_xy": [-1.26, -0.84], "size_xy": [0.12, 0.96]},
+    {"name": "vertical_1_3_3", "center_xy": [-1.26, 0.84], "size_xy": [0.12, 0.96]},
+    {"name": "vertical_2_0_0", "center_xy": [-0.42, -1.68], "size_xy": [0.12, 0.96]},
+    {"name": "vertical_2_3_3", "center_xy": [-0.42, 0.84], "size_xy": [0.12, 0.96]},
+    {"name": "vertical_4_1_2", "center_xy": [1.26, -0.42], "size_xy": [0.12, 1.8]}
+  ]
+}

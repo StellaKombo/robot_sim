@@ -695,7 +695,8 @@ class KCFCommand(CommandSource):
             self.reset()
         lead = 0 if self.synchronous_feedback else self.application_lead_steps
         application_time = float(state.t + lead * self.dt)
-        if self.reference_path._initial_pose is None and np.isfinite(state.q).all():
+        if (self.reference_path.maze is None and self.reference_path._initial_pose is None
+                and np.isfinite(state.q).all()):
             self.reference_path.set_initial_pose(
                 [state.q[0], state.q[1], g1_world_heading(state)])
         self.ref = np.asarray(
@@ -725,7 +726,7 @@ class KCFCommand(CommandSource):
         )
         if self.last_state_time == state.t and not duplicate:
             self.reset()
-            if np.isfinite(state.q).all():
+            if self.reference_path.maze is None and np.isfinite(state.q).all():
                 self.reference_path.set_initial_pose(
                     [state.q[0], state.q[1], g1_world_heading(state)])
             observation = self._encode_state(state)
@@ -741,6 +742,13 @@ class KCFCommand(CommandSource):
             self.theta_prev = g1_world_heading(state, self.theta_prev)
             self.last_state_time = float(state.t)
             self.last_observation = observation.copy()
+            if self.reference_path.maze is not None:
+                pose = np.array([state.q[0], state.q[1], self.theta_prev])
+                if self.reference_path._initial_pose is None:
+                    self.reference_path.set_initial_pose(pose)
+                self.reference_path.maze.observe(
+                    pose, observation[4:7], state.t - self.t_start)
+                self.ref = np.asarray(self.reference(application_time - self.t_start)[0][:2]).copy()
 
         if fresh and self.standing_hold is not None:
             poses, twists = self.reference(
